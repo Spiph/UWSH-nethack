@@ -1,5 +1,6 @@
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -7,7 +8,7 @@ from pydantic import ValidationError
 
 from ups.config import load_config
 from ups.gate import REQUIRED_NUMERICAL_CHECKS, evaluate_gate
-from ups.workflow import reproduce, validate_existing_stage
+from ups.workflow import reproduce, train, validate_existing_stage
 
 ROOT = Path(__file__).parents[1]
 
@@ -68,3 +69,23 @@ def test_reduced_reproduction_is_no_go(tmp_path: Path) -> None:
     checkpoint.write_bytes(checkpoint.read_bytes() + b"corrupt")
     with pytest.raises(RuntimeError, match="corrupt stage artifact"):
         validate_existing_stage(config, "train")
+
+
+def test_sol_smoke_launch_records_sample_factory_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = load_config(ROOT / "configs/smoke.yaml").model_copy(
+        update={"artifact_root": tmp_path / "run"}
+    )
+    monkeypatch.setenv("SOL_COMMIT", "7c272b66e6ebe72ca008526d33f7e2e40e660af5")
+
+    def fake_run(command: list[str], check: bool) -> None:
+        assert check is True
+        experiment = command[command.index("--experiment") + 1]
+        (config.artifact_root / "sample_factory" / experiment).mkdir(parents=True)
+
+    monkeypatch.setattr("ups.workflow.subprocess", SimpleNamespace(run=fake_run))
+    stage = train(config, sol_smoke=True)
+    payload = json.loads(stage.read_text())
+    assert payload["status"] == "SMOKE_ONLY"
+    assert payload["command"][-1] == "--smoke"

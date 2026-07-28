@@ -90,6 +90,9 @@ testpaths = ["tests"]
 [tool.coverage.run]
 branch = true
 source = ["ups"]
+# These modules are exercised in the pinned SOL image, whose patched Sample
+# Factory/NLE dependencies are deliberately mutually exclusive with local dev.
+omit = ["src/ups/sol.py", "src/ups/sol_train.py"]
 
 [tool.coverage.report]
 show_missing = true

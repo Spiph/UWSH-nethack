@@ -14,6 +14,10 @@ The canonical report is generated at
 `artifacts/phase0/phase0_gate.{json,md}`. A valid scientific `NO_GO` is an expected
 outcome; it explicitly prohibits Phase One.
 
+For command-by-command instructions, see [`docs/USAGE.md`](docs/USAGE.md). For the
+current failures and the work required to complete the study, see
+[`docs/PHASE0_COMPLETION_PLAN.md`](docs/PHASE0_COMPLETION_PLAN.md).
+
 ## Reproduce
 
 Python 3.10 and [uv](https://docs.astral.sh/uv/) are required.

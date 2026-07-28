@@ -7,18 +7,19 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=ghcr.io/astral-sh/uv:0.8.3 /uv /usr/local/bin/uv
 WORKDIR /workspace
 COPY pyproject.toml uv.lock README.md ./
-COPY src ./src
 # The SOL compatibility profile carries its patched NLE and Sample Factory fork
 # together, matching the upstream SOL checkout rather than mixing incompatible
 # release pins.
 RUN git clone --filter=blob:none https://github.com/facebookresearch/sol.git /opt/sol \
     && git -C /opt/sol checkout "7c272b66e6ebe72ca008526d33f7e2e40e660af5" \
-    && uv sync --frozen --extra sol --extra adapter --no-dev \
+    && uv sync --frozen --extra sol --extra adapter --no-dev --no-install-project \
     && cd /opt/sol/sample_factory/algo/utils/cython \
     && /workspace/.venv/bin/python setup.py build_ext --inplace \
     && cd /workspace \
     && uv pip install --python /workspace/.venv/bin/python --no-deps -e /opt/sol \
     && uv pip install --python /workspace/.venv/bin/python --no-deps -e /opt/sol/nle_patched
+COPY src ./src
+RUN uv sync --frozen --extra sol --extra adapter --no-dev
 
 FROM python:3.10.14-slim-bookworm AS cpu
 RUN apt-get update && apt-get install -y --no-install-recommends libgl1 libglib2.0-0 libncurses6 \

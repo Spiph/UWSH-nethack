@@ -3,6 +3,7 @@ import pytest
 import torch
 
 from ups.model import NLE_ACTIONS, RecurrentNLEPolicy
+from ups.sol import crop_glyphs
 from ups.statistics import confidence_interval, hierarchical_bootstrap
 
 
@@ -26,3 +27,14 @@ def test_hierarchical_bootstrap_is_deterministic() -> None:
     assert low <= high
     with pytest.raises(ValueError):
         confidence_interval(np.array([np.nan]))
+
+
+def test_phase_zero_crop_uses_nethack_xy_coordinates_and_padding() -> None:
+    glyphs = np.arange(9, dtype=np.int16).reshape(3, 3)
+    center = crop_glyphs(glyphs, np.array([1, 1]), 3)
+    assert np.array_equal(center, glyphs)
+    corner = crop_glyphs(glyphs, np.array([0, 0]), 3)
+    assert corner.shape == (3, 3)
+    assert corner[1, 1] == glyphs[0, 0]
+    with pytest.raises(ValueError, match="shape"):
+        crop_glyphs(glyphs[None], np.array([0, 0]), 3)

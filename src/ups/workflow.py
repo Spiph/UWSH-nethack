@@ -8,6 +8,8 @@ from __future__ import annotations
 
 import json
 import os
+import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 from typing import Any
@@ -68,8 +70,45 @@ def validate_existing_stage(config: Phase0Config, name: str) -> bool:
     return True
 
 
-def train(config: Phase0Config, reduced: bool = False) -> Path:
+def train(config: Phase0Config, reduced: bool = False, sol_smoke: bool = False) -> Path:
     """Create deterministic smoke checkpoints or declare the full APPO launch contract."""
+    if sol_smoke:
+        if config.training.runtime != "sol_patched":
+            raise RuntimeError("SOL APPO smoke runs require training.runtime=sol_patched")
+        if os.environ.get("SOL_COMMIT") != "7c272b66e6ebe72ca008526d33f7e2e40e660af5":
+            raise RuntimeError("SOL APPO smoke runs must execute in the pinned research container")
+        environment = config.environments[0]
+        experiment = (
+            f"{config.study}-{environment.removesuffix('-v0').lower()}-seed{config.seeds[0]}-smoke"
+        )
+        command = [
+            sys.executable,
+            "-m",
+            "ups.sol_train",
+            "--environment",
+            environment,
+            "--seed",
+            str(config.seeds[0]),
+            "--artifact-root",
+            str(config.artifact_root),
+            "--experiment",
+            experiment,
+            "--max-steps",
+            str(config.training.max_environment_steps),
+            "--smoke",
+        ]
+        subprocess.run(command, check=True)
+        checkpoint_root = config.artifact_root / "sample_factory" / experiment
+        return record_stage(
+            config,
+            "train",
+            {
+                "status": "SMOKE_ONLY",
+                "checkpoint": str(checkpoint_root),
+                "full_population": False,
+                "command": command,
+            },
+        )
     if not reduced:
         return record_stage(
             config,
