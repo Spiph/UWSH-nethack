@@ -341,6 +341,38 @@ def test_population_launcher_records_resumable_chunks(
     payload = json.loads(stage.read_text())
     assert payload["status"] == "TRAINED_AWAITING_EVALUATION"
     assert len(payload["jobs"][0]["checkpoints"]) == 2
+    resumed = launch_population(config)
+    assert json.loads(resumed.read_text())["status"] == "TRAINED_AWAITING_EVALUATION"
+
+
+def test_population_launcher_recovers_malformed_progress_report(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = load_config(ROOT / "configs/smoke.yaml").model_copy(
+        update={"artifact_root": tmp_path / "run"}
+    )
+    monkeypatch.setenv("SOL_COMMIT", "7c272b66e6ebe72ca008526d33f7e2e40e660af5")
+    population = config.artifact_root / "population"
+    population.mkdir(parents=True)
+    (population / "training_report.json").write_text("{")
+
+    def fake_run(command: list[str], check: bool) -> None:
+        experiment = command[command.index("--experiment") + 1]
+        target = command[command.index("--max-steps") + 1]
+        checkpoint = (
+            config.artifact_root
+            / "sample_factory"
+            / experiment
+            / "checkpoint_p0"
+            / f"checkpoint_{target}.pth"
+        )
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_text(target)
+
+    monkeypatch.setattr("ups.workflow.subprocess", SimpleNamespace(run=fake_run))
+    assert (
+        json.loads(launch_population(config).read_text())["status"] == "TRAINED_AWAITING_EVALUATION"
+    )
 
 
 def test_evaluator_replays_fixed_episodes_and_writes_registry(

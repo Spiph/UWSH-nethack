@@ -189,12 +189,34 @@ def launch_population(config: Phase0Config, plan_only: bool = False) -> Path:
         raise RuntimeError("the Phase Zero population requires the pinned SOL runtime")
     if os.environ.get("SOL_COMMIT") != "7c272b66e6ebe72ca008526d33f7e2e40e660af5":
         raise RuntimeError("run the Phase Zero population inside the pinned research container")
-    job_records: list[dict[str, Any]] = []
+    report = population_root / "training_report.json"
+    prior: dict[tuple[str, int], dict[str, Any]] = {}
+    if report.is_file():
+        try:
+            saved = json.loads(report.read_text(encoding="utf-8"))
+            if saved.get("config_hash") == config.digest:
+                prior = {
+                    (job["environment"], job["seed"]): job
+                    for job in saved.get("jobs", [])
+                    if isinstance(job, dict)
+                }
+        except (OSError, json.JSONDecodeError):
+            prior = {}
+    job_records: list[dict[str, Any]] = [
+        prior[key] for key in ((job["environment"], job["seed"]) for job in jobs) if key in prior
+    ]
     interval = config.training.evaluation_interval
     for job in jobs:
         experiment_root = config.artifact_root / "sample_factory" / job["experiment"]
-        checkpoints: list[dict[str, Any]] = []
+        checkpoints = list(prior.get((job["environment"], job["seed"]), {}).get("checkpoints", []))
+        completed_targets = {
+            record.get("target_environment_steps")
+            for record in checkpoints
+            if isinstance(record, dict) and Path(record.get("checkpoint", "")).is_file()
+        }
         for target in range(interval, config.training.max_environment_steps + interval, interval):
+            if target in completed_targets:
+                continue
             command = [
                 sys.executable,
                 "-m",
@@ -227,8 +249,26 @@ def launch_population(config: Phase0Config, plan_only: bool = False) -> Path:
                     "evaluation": "AWAITING_FIXED_200_EPISODE_EVALUATION",
                 }
             )
-        job_records.append({**job, "checkpoints": checkpoints})
-    report = population_root / "training_report.json"
+            job_records = [
+                {**existing, "checkpoints": checkpoints}
+                for existing in job_records
+                if (existing["environment"], existing["seed"]) != (job["environment"], job["seed"])
+            ]
+            job_records.append({**job, "checkpoints": checkpoints})
+            atomic_json(
+                report,
+                {
+                    "config_hash": config.digest,
+                    "jobs": job_records,
+                    "status": "TRAINING_IN_PROGRESS",
+                    "qualified_population": False,
+                },
+            )
+        if not any(
+            (record["environment"], record["seed"]) == (job["environment"], job["seed"])
+            for record in job_records
+        ):
+            job_records.append({**job, "checkpoints": checkpoints})
     atomic_json(
         report,
         {
