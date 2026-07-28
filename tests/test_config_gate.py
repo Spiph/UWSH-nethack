@@ -276,6 +276,16 @@ def test_verifier_accepts_intact_provenance_shell(tmp_path: Path) -> None:
         mutated.to_parquet(raw_table, index=False)
         assert _evaluation_checks(config)[0] is False
     raw_valid.to_parquet(raw_table, index=False)
+    low_quality = raw_valid.copy()
+    low_quality["success"] = [True, False]
+    low_quality.to_parquet(raw_table, index=False)
+    registry.loc[0, "success_rate"] = 0.5
+    registry.loc[0, "median_return"] = 1.0
+    registry.to_parquet(evaluations / "policy_registry.parquet", index=False)
+    assert _evaluation_checks(config)[0] is False
+    raw_valid.to_parquet(raw_table, index=False)
+    registry.loc[0, "success_rate"] = 1.0
+    registry.to_parquet(evaluations / "policy_registry.parquet", index=False)
     pd.DataFrame(columns=raw_valid.columns).to_parquet(raw_table, index=False)
     assert _evaluation_checks(config)[0] is False
     raw_valid.to_parquet(raw_table, index=False)

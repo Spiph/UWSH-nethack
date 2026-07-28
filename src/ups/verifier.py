@@ -260,10 +260,16 @@ def _evaluation_checks(config: Phase0Config) -> tuple[bool, list[str]]:
         if not is_bool_dtype(raw["terminated"]) or not is_bool_dtype(raw["truncated"]):
             failures.append(f"raw evaluation table has invalid termination fields: {raw_path}")
         if is_bool_dtype(successes) and is_numeric_dtype(returns):
-            if abs(float(successes.mean()) - float(declared_rate)) > 1e-12:
+            recomputed_rate = float(successes.mean())
+            if abs(recomputed_rate - float(declared_rate)) > 1e-12:
                 failures.append(f"success-rate summary does not match raw table: {raw_path}")
             if abs(float(returns.median()) - float(declared_median)) > 1e-12:
                 failures.append(f"median-return summary does not match raw table: {raw_path}")
+            if (
+                row["target_environment_steps"] == config.training.max_environment_steps
+                and recomputed_rate < config.training.minimum_success
+            ):
+                failures.append(f"final policy is below success threshold: {raw_path}")
     if (
         not table["success_rate"]
         .map(lambda value: isinstance(value, (int, float)) and isfinite(value))
