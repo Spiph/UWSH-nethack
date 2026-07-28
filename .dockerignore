@@ -1,0 +1,30 @@
+.git
+.venv
+.mypy_cache
+.pytest_cache
+.ruff_cache
+artifacts
+__pycache__
+
+# Runtime-mounted or development-only files
+configs
+tests
+.github
+.agents
+.codex
+.pre-commit-cache
+.pre-commit-config.yaml
+compose.yaml
+
+# Documentation and research sources not copied into the image
+*.pdf
+LICENSE
+
+# Local reports, logs, and editor metadata
+.coverage
+.idea
+.vscode
+*.log
+.DS_Store
+tensorboard
+wandb

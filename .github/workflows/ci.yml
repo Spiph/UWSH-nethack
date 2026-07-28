@@ -1,0 +1,25 @@
+name: phase-zero
+on:
+  push:
+  pull_request:
+jobs:
+  quality:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: astral-sh/setup-uv@v6
+        with:
+          python-version: "3.10"
+      - run: uv sync --frozen --extra dev
+      - run: uv run ruff format --check .
+      - run: uv run ruff check .
+      - run: uv run mypy src tests
+      - run: uv run pytest --cov=ups --cov-fail-under=90
+      - run: uv run ups reproduce phase0 --config configs/smoke.yaml --reduced
+      - run: test "$(jq -r .decision artifacts/smoke/phase0_gate.json)" = "NO_GO"
+  docker:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: docker compose build research-cpu
+      - run: docker compose run --rm research-cpu --help

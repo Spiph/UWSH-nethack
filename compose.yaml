@@ -1,0 +1,36 @@
+services:
+  research-cpu:
+    build:
+      context: .
+      target: cpu
+    user: "${UID:-1000}:${GID:-1000}"
+    volumes:
+      - ./artifacts:/workspace/artifacts
+      - ./configs:/workspace/configs:ro
+      - hf-cache:/cache/huggingface
+    environment:
+      HF_HOME: /cache/huggingface
+
+  research-gpu:
+    build:
+      context: .
+      target: gpu
+    user: "${UID:-1000}:${GID:-1000}"
+    gpus: all
+    volumes:
+      - ./artifacts:/workspace/artifacts
+      - ./configs:/workspace/configs:ro
+      - hf-cache:/cache/huggingface
+    environment:
+      HF_HOME: /cache/huggingface
+
+  tensorboard:
+    image: tensorflow/tensorflow:2.16.1
+    command: tensorboard --logdir=/artifacts/tensorboard --host=0.0.0.0
+    ports:
+      - "6006:6006"
+    volumes:
+      - ./artifacts:/artifacts:ro
+
+volumes:
+  hf-cache:

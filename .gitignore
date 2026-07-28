@@ -216,3 +216,14 @@ __marimo__/
 
 # Streamlit
 .streamlit/secrets.toml
+
+# Project-generated experiment outputs
+/artifacts/
+
+# Local tools and runtime output
+.idea/
+.vscode/
+*.log
+tensorboard/
+wandb/
+.DS_Store

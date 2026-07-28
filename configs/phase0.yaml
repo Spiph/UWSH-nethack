@@ -1,0 +1,42 @@
+schema_version: 1
+study: phase0
+artifact_root: artifacts/phase0
+seeds: [0, 1, 2]
+environments:
+  - MiniHack-Room-Random-5x5-v0
+  - MiniHack-Room-Dark-5x5-v0
+  - MiniHack-Room-Monster-5x5-v0
+  - MiniHack-Room-Trap-5x5-v0
+training:
+  algorithm: APPO
+  runtime: sol_patched
+  max_environment_steps: 2000000
+  evaluation_interval: 100000
+  evaluation_episodes: 200
+  minimum_success: 0.75
+evaluation_buffer:
+  sequences: 512
+  sequence_length: 32
+  fixed_seeds: [1101, 1102, 1103, 1104]
+analysis:
+  primary_modules: [encoder, actor]
+  explained_variance: 0.95
+  null_replicates: 1000
+  bootstrap_replicates: 1000
+  leave_one_task_out: true
+adapters:
+  repositories:
+    - TransferGraph/roberta-base-finetuned-lora-ag_news
+    - TransferGraph/roberta-base-finetuned-lora-tweet_eval_irony
+    - TransferGraph/roberta-base-finetuned-lora-tweet_eval_emotion
+    - TransferGraph/roberta-base-finetuned-lora-tweet_eval_hate
+  projections: [query, value]
+gate:
+  immutable: true
+  null_effect_min_sd: 2.0
+  retention_median_min: 0.90
+  retention_ci_low_min: 0.80
+  action_kl_max: 0.05
+  action_agreement_min: 0.95
+  feature_cka_min: 0.90
+  normalized_value_rmse_max: 0.10

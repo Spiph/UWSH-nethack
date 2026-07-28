@@ -1,0 +1,34 @@
+schema_version: 1
+study: phase0-smoke
+artifact_root: artifacts/smoke
+seeds: [0]
+environments: [MiniHack-Room-Random-5x5-v0]
+training:
+  algorithm: APPO
+  runtime: sol_patched
+  max_environment_steps: 128
+  evaluation_interval: 64
+  evaluation_episodes: 2
+  minimum_success: 0.75
+evaluation_buffer:
+  sequences: 8
+  sequence_length: 4
+  fixed_seeds: [1101]
+analysis:
+  primary_modules: [encoder, actor]
+  explained_variance: 0.95
+  null_replicates: 8
+  bootstrap_replicates: 32
+  leave_one_task_out: true
+adapters:
+  repositories: []
+  projections: [query, value]
+gate:
+  immutable: true
+  null_effect_min_sd: 2.0
+  retention_median_min: 0.90
+  retention_ci_low_min: 0.80
+  action_kl_max: 0.05
+  action_agreement_min: 0.95
+  feature_cka_min: 0.90
+  normalized_value_rmse_max: 0.10
