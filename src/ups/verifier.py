@@ -76,13 +76,39 @@ def _manifest_checks(config: Phase0Config) -> tuple[bool, list[str]]:
 
 
 def _population_checks(config: Phase0Config) -> tuple[bool, list[str]]:
+    training_path = config.artifact_root / "population" / "training_report.json"
+    training_failures: list[str] = []
+    if training_path.is_file():
+        try:
+            training = json.loads(training_path.read_text(encoding="utf-8"))
+            if training.get("config_hash") != config.digest:
+                training_failures.append("stale config hash in training report")
+            jobs = training.get("jobs", [])
+            expected_pairs = {
+                (environment, seed) for environment in config.environments for seed in config.seeds
+            }
+            observed_pairs = {(job.get("environment"), job.get("seed")) for job in jobs}
+            if observed_pairs != expected_pairs or len(jobs) != len(expected_pairs):
+                training_failures.append(
+                    "training report has incomplete or duplicate task/seed jobs"
+                )
+            for job in jobs:
+                for checkpoint in job.get("checkpoints", []):
+                    path = Path(checkpoint.get("checkpoint", ""))
+                    expected_hash = checkpoint.get("checkpoint_sha256")
+                    if not path.is_file() or not isinstance(expected_hash, str):
+                        training_failures.append(f"missing checkpoint record: {path}")
+                    elif sha256_file(path) != expected_hash:
+                        training_failures.append(f"checkpoint hash mismatch: {path}")
+        except (OSError, json.JSONDecodeError, AttributeError):
+            training_failures.append("invalid training report")
     report_path = config.artifact_root / "weights" / "extraction.json"
     if not report_path.is_file():
-        return False, [f"missing extracted population report: {report_path}"]
+        return False, [*training_failures, f"missing extracted population report: {report_path}"]
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
     except (OSError, json.JSONDecodeError) as error:
-        return False, [f"invalid extracted population report: {error}"]
+        return False, [*training_failures, f"invalid extracted population report: {error}"]
     expected = len(config.environments) * len(config.seeds)
     failures: list[str] = []
     if report.get("expected_population") != expected:
@@ -91,7 +117,7 @@ def _population_checks(config: Phase0Config) -> tuple[bool, list[str]]:
         failures.append("required task/seed population is incomplete")
     if report.get("qualified_population") is not True:
         failures.append("population has not been independently qualified")
-    return not failures, failures
+    return not (failures or training_failures), training_failures + failures
 
 
 def _evaluation_checks(config: Phase0Config) -> tuple[bool, list[str]]:

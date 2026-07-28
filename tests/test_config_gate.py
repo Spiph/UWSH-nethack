@@ -10,6 +10,7 @@ from pydantic import ValidationError
 from safetensors.torch import load_file
 
 import ups.gate as gate_module
+from ups.artifacts import sha256_file
 from ups.config import load_config
 from ups.gate import (
     REQUIRED_NUMERICAL_CHECKS,
@@ -17,7 +18,7 @@ from ups.gate import (
     _null_ensemble_counts,
     evaluate_gate,
 )
-from ups.verifier import _manifest_checks, _population_checks, verify_artifacts
+from ups.verifier import _evaluation_checks, _manifest_checks, _population_checks, verify_artifacts
 from ups.workflow import (
     _phase0_state_dict,
     evaluate,
@@ -258,6 +259,61 @@ def test_verifier_reports_manifest_and_population_corruption(tmp_path: Path) -> 
     assert _population_checks(config)[0] is False
     report.write_text(json.dumps({"expected_population": 0, "extracted_population": 0}))
     assert _population_checks(config)[0] is False
+
+
+def test_verifier_checks_training_checkpoint_hashes(tmp_path: Path) -> None:
+    config = load_config(ROOT / "configs/smoke.yaml").model_copy(
+        update={"artifact_root": tmp_path / "run"}
+    )
+    checkpoint = config.artifact_root / "sample_factory" / "job" / "checkpoint.pth"
+    checkpoint.parent.mkdir(parents=True)
+    checkpoint.write_bytes(b"checkpoint")
+    training = config.artifact_root / "population"
+    training.mkdir(parents=True)
+    (training / "training_report.json").write_text(
+        json.dumps(
+            {
+                "config_hash": config.digest,
+                "jobs": [
+                    {
+                        "environment": config.environments[0],
+                        "seed": config.seeds[0],
+                        "checkpoints": [
+                            {
+                                "checkpoint": str(checkpoint),
+                                "checkpoint_sha256": sha256_file(checkpoint),
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    )
+    weights = config.artifact_root / "weights"
+    weights.mkdir(parents=True)
+    (weights / "extraction.json").write_text(
+        json.dumps(
+            {
+                "expected_population": 1,
+                "extracted_population": 1,
+                "qualified_population": True,
+            }
+        )
+    )
+    assert _population_checks(config)[0] is True
+    checkpoint.write_bytes(b"tampered")
+    assert _population_checks(config)[0] is False
+
+
+def test_verifier_rejects_bad_evaluation_registry(tmp_path: Path) -> None:
+    config = load_config(ROOT / "configs/smoke.yaml").model_copy(
+        update={"artifact_root": tmp_path / "run"}
+    )
+    evaluations = config.artifact_root / "evaluations"
+    evaluations.mkdir(parents=True)
+    (evaluations / "evaluation_report.json").write_text(json.dumps({"config_hash": "stale"}))
+    pd.DataFrame({"wrong": [1]}).to_parquet(evaluations / "policy_registry.parquet", index=False)
+    assert _evaluation_checks(config)[0] is False
 
 
 def test_reduced_reproduction_is_no_go(tmp_path: Path) -> None:
