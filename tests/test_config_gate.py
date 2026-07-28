@@ -188,14 +188,31 @@ def test_verifier_accepts_intact_provenance_shell(tmp_path: Path) -> None:
     evaluations = config.artifact_root / "evaluations"
     evaluations.mkdir(parents=True)
     raw_table = evaluations / "raw.parquet"
-    pd.DataFrame({"success": [True]}).to_parquet(raw_table, index=False)
+    checkpoint_path = str(config.artifact_root / "checkpoint.pth")
+    checkpoint_hash = "checkpoint-hash"
+    pd.DataFrame(
+        {
+            "environment": [config.environments[0], config.environments[0]],
+            "checkpoint": [checkpoint_path, checkpoint_path],
+            "checkpoint_sha256": [checkpoint_hash, checkpoint_hash],
+            "episode": [0, 1],
+            "seed": [1101, 1102],
+            "success": [True, True],
+            "return": [1.0, 1.0],
+            "terminated": [True, True],
+            "truncated": [False, False],
+        }
+    ).to_parquet(raw_table, index=False)
     pd.DataFrame(
         [
             {
                 "environment": config.environments[0],
                 "seed": config.seeds[0],
                 "target_environment_steps": config.training.max_environment_steps,
+                "checkpoint": checkpoint_path,
+                "checkpoint_sha256": checkpoint_hash,
                 "success_rate": 1.0,
+                "median_return": 1.0,
                 "episodes": config.training.evaluation_episodes,
                 "evaluation_table": str(raw_table),
             }
@@ -221,18 +238,67 @@ def test_verifier_accepts_intact_provenance_shell(tmp_path: Path) -> None:
         },
     )
     assert result["verified"] is True
-    raw_table.unlink()
-    assert verify_artifacts(
-        config,
-        {
-            "config_hash": config.digest,
-            "evidence_class": "PREREGISTERED_FULL",
-            "completeness": {
-                "seed_leakage_detected": False,
-                "null_invariants_verified": True,
+    registry = pd.read_parquet(evaluations / "policy_registry.parquet")
+    raw_valid = pd.read_parquet(raw_table)
+    for column, values in (
+        ("episode", [1, 0]),
+        ("seed", [1102, 1103]),
+        ("checkpoint", ["other", "other"]),
+        ("success", [1, 0]),
+        ("return", [float("nan"), 1.0]),
+        ("terminated", [1, 1]),
+    ):
+        mutated = raw_valid.copy()
+        mutated[column] = values
+        mutated.to_parquet(raw_table, index=False)
+        assert _evaluation_checks(config)[0] is False
+    raw_valid.to_parquet(raw_table, index=False)
+    pd.DataFrame(columns=raw_valid.columns).to_parquet(raw_table, index=False)
+    assert _evaluation_checks(config)[0] is False
+    raw_valid.to_parquet(raw_table, index=False)
+    registry.loc[0, "environment"] = "unknown"
+    registry.to_parquet(evaluations / "policy_registry.parquet", index=False)
+    assert _evaluation_checks(config)[0] is False
+    registry.loc[0, "environment"] = config.environments[0]
+    registry.to_parquet(evaluations / "policy_registry.parquet", index=False)
+    registry = pd.read_parquet(evaluations / "policy_registry.parquet")
+    registry.loc[0, "success_rate"] = 0.0
+    registry.to_parquet(evaluations / "policy_registry.parquet", index=False)
+    assert (
+        verify_artifacts(
+            config,
+            {
+                "config_hash": config.digest,
+                "evidence_class": "PREREGISTERED_FULL",
+                "completeness": {
+                    "seed_leakage_detected": False,
+                    "null_invariants_verified": True,
+                },
             },
-        },
-    )["verified"] is False
+        )["verified"]
+        is False
+    )
+    registry.loc[0, "success_rate"] = 1.0
+    registry.to_parquet(evaluations / "policy_registry.parquet", index=False)
+    pd.DataFrame({"success": [True]}).to_parquet(raw_table, index=False)
+    assert _evaluation_checks(config)[0] is False
+    pd.DataFrame({"other": [True, True]}).to_parquet(raw_table, index=False)
+    assert _evaluation_checks(config)[0] is False
+    raw_table.unlink()
+    assert (
+        verify_artifacts(
+            config,
+            {
+                "config_hash": config.digest,
+                "evidence_class": "PREREGISTERED_FULL",
+                "completeness": {
+                    "seed_leakage_detected": False,
+                    "null_invariants_verified": True,
+                },
+            },
+        )["verified"]
+        is False
+    )
 
 
 def test_verifier_reports_manifest_and_population_corruption(tmp_path: Path) -> None:

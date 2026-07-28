@@ -13,6 +13,7 @@ from pathlib import Path
 from typing import Any
 
 import pandas as pd  # type: ignore[import-untyped]
+from pandas.api.types import is_bool_dtype, is_numeric_dtype  # type: ignore[import-untyped]
 
 from ups.artifacts import sha256_file
 from ups.config import Phase0Config
@@ -140,7 +141,10 @@ def _evaluation_checks(config: Phase0Config) -> tuple[bool, list[str]]:
         "environment",
         "seed",
         "target_environment_steps",
+        "checkpoint",
+        "checkpoint_sha256",
         "success_rate",
+        "median_return",
         "episodes",
         "evaluation_table",
     }
@@ -148,18 +152,79 @@ def _evaluation_checks(config: Phase0Config) -> tuple[bool, list[str]]:
         failures.append("evaluation registry is missing required columns")
         return False, failures
     expected = {(environment, seed) for environment in config.environments for seed in config.seeds}
+    fixed_seeds = dict(zip(config.environments, config.evaluation_buffer.fixed_seeds, strict=True))
     final = table[table["target_environment_steps"] == config.training.max_environment_steps]
     observed = set(zip(final["environment"], final["seed"], strict=False))
     if observed != expected or len(final) != len(expected):
         failures.append("evaluation registry final task/seed pairs are incomplete or duplicated")
     if table[list(required)].isnull().any().any():
         failures.append("evaluation registry contains null required values")
-    for raw_table, episodes in zip(table["evaluation_table"], table["episodes"], strict=False):
+    for _, row in table.iterrows():
+        raw_table = row["evaluation_table"]
+        episodes = row["episodes"]
+        declared_rate = row["success_rate"]
+        declared_median = row["median_return"]
         raw_path = Path(str(raw_table))
         if not raw_path.is_file():
             failures.append(f"missing raw evaluation table: {raw_path}")
-        elif not isinstance(episodes, int) or episodes != config.training.evaluation_episodes:
+            continue
+        try:
+            raw = pd.read_parquet(raw_path)
+        except (OSError, ValueError, ImportError) as error:
+            failures.append(f"invalid raw evaluation table {raw_path}: {error}")
+            continue
+        if not isinstance(episodes, int) or episodes != config.training.evaluation_episodes:
             failures.append("evaluation record has wrong episode count")
+        if len(raw) != config.training.evaluation_episodes:
+            failures.append(f"raw evaluation table has wrong episode count: {raw_path}")
+        required_raw = {
+            "environment",
+            "checkpoint",
+            "checkpoint_sha256",
+            "episode",
+            "seed",
+            "success",
+            "return",
+            "terminated",
+            "truncated",
+        }
+        if not required_raw.issubset(raw.columns):
+            failures.append(f"raw evaluation table is missing required columns: {raw_path}")
+            continue
+        if raw.empty:
+            failures.append(f"raw evaluation table is empty: {raw_path}")
+            continue
+        expected_episodes = list(range(config.training.evaluation_episodes))
+        if raw["episode"].tolist() != expected_episodes:
+            failures.append(f"raw evaluation episode IDs are not exactly ordered: {raw_path}")
+        environment = str(row["environment"])
+        if environment not in fixed_seeds:
+            failures.append(f"evaluation registry has unknown environment: {environment}")
+            continue
+        expected_seeds = [fixed_seeds[environment] + episode for episode in expected_episodes]
+        if raw["seed"].tolist() != expected_seeds:
+            failures.append(f"raw evaluation seeds do not match fixed seeds: {raw_path}")
+        if raw["environment"].nunique() != 1 or str(raw.iloc[0]["environment"]) != environment:
+            failures.append(f"raw evaluation environment linkage mismatch: {raw_path}")
+        for field in ("checkpoint", "checkpoint_sha256"):
+            if raw[field].nunique() != 1 or str(raw.iloc[0][field]) != str(row[field]):
+                failures.append(f"raw evaluation {field} linkage mismatch: {raw_path}")
+        successes = raw["success"]
+        if not is_bool_dtype(successes):
+            failures.append(f"raw evaluation table has non-boolean success values: {raw_path}")
+        returns = raw["return"]
+        if (
+            not is_numeric_dtype(returns)
+            or not returns.map(lambda value: isfinite(float(value))).all()
+        ):
+            failures.append(f"raw evaluation table has non-finite returns: {raw_path}")
+        if not is_bool_dtype(raw["terminated"]) or not is_bool_dtype(raw["truncated"]):
+            failures.append(f"raw evaluation table has invalid termination fields: {raw_path}")
+        if is_bool_dtype(successes) and is_numeric_dtype(returns):
+            if abs(float(successes.mean()) - float(declared_rate)) > 1e-12:
+                failures.append(f"success-rate summary does not match raw table: {raw_path}")
+            if abs(float(returns.median()) - float(declared_median)) > 1e-12:
+                failures.append(f"median-return summary does not match raw table: {raw_path}")
     if (
         not table["success_rate"]
         .map(lambda value: isinstance(value, (int, float)) and isfinite(value))
