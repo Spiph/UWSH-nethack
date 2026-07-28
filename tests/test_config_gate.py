@@ -20,6 +20,8 @@ from ups.verifier import _manifest_checks, _population_checks, verify_artifacts
 from ups.workflow import (
     _phase0_state_dict,
     extract_updates,
+    launch_population,
+    population_jobs,
     reproduce,
     train,
     validate_existing_stage,
@@ -267,6 +269,52 @@ def test_sol_smoke_launch_records_sample_factory_artifact(
     assert "--smoke" in payload["command"]
     assert payload["command"][-1] == "--resume"
     assert payload["resume"] is True
+
+
+def test_population_plan_is_exact_and_deterministic(tmp_path: Path) -> None:
+    config = load_config(ROOT / "configs/smoke.yaml").model_copy(
+        update={"artifact_root": tmp_path / "run"}
+    )
+    jobs = population_jobs(config)
+    assert [(job["environment"], job["seed"]) for job in jobs] == [
+        ("MiniHack-Room-Random-5x5-v0", 0)
+    ]
+    stage = launch_population(config, plan_only=True)
+    payload = json.loads(stage.read_text())
+    assert payload["status"] == "PLAN_ONLY"
+    assert (
+        json.loads((config.artifact_root / "population/population_plan.json").read_text())["jobs"]
+        == jobs
+    )
+
+
+def test_population_launcher_records_resumable_chunks(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = load_config(ROOT / "configs/smoke.yaml").model_copy(
+        update={"artifact_root": tmp_path / "run"}
+    )
+    monkeypatch.setenv("SOL_COMMIT", "7c272b66e6ebe72ca008526d33f7e2e40e660af5")
+
+    def fake_run(command: list[str], check: bool) -> None:
+        assert check is True
+        experiment = command[command.index("--experiment") + 1]
+        target = command[command.index("--max-steps") + 1]
+        checkpoint = (
+            config.artifact_root
+            / "sample_factory"
+            / experiment
+            / "checkpoint_p0"
+            / f"checkpoint_{target}.pth"
+        )
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_text(target)
+
+    monkeypatch.setattr("ups.workflow.subprocess", SimpleNamespace(run=fake_run))
+    stage = launch_population(config)
+    payload = json.loads(stage.read_text())
+    assert payload["status"] == "TRAINED_AWAITING_EVALUATION"
+    assert len(payload["jobs"][0]["checkpoints"]) == 2
 
 
 def test_extract_sol_checkpoint_to_safetensors(tmp_path: Path) -> None:

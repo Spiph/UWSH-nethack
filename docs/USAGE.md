@@ -76,8 +76,8 @@ must not be used as scientific evidence.
 
 ## 4. Run the full Phase Zero workflow contract
 
-The full command exercises the orchestration contract but deliberately does not
-pretend to have trained the 12-policy APPO population:
+The full command creates the exact 12-job registry and, inside the pinned SOL
+container, launches each job in resumable 100,000-step chunks:
 
 ```bash
 uv run ups reproduce phase0 --config configs/phase0.yaml
@@ -90,9 +90,16 @@ docker compose run --rm research-gpu \
   reproduce phase0 --config configs/phase0.yaml
 ```
 
-The current `train` stage records `NOT_EXECUTED` for a non-reduced run. A future
-training adapter must replace that stage with real checkpoints before the gate can
-admit scientific evidence. The expected canonical outputs are:
+Inspect the immutable job plan without launching workers:
+
+```bash
+docker compose run --rm research-gpu \
+  train --config configs/phase0.yaml --plan-only
+```
+
+Training stops with `TRAINED_AWAITING_EVALUATION`; it does not qualify policies or
+authorize the gate. The fixed 200-episode evaluator is still required before any
+checkpoint can become retained-policy evidence. The expected canonical outputs are:
 
 ```text
 artifacts/phase0/checkpoints/
@@ -153,10 +160,10 @@ All commands accept `--config PATH`; the default is `configs/phase0.yaml`.
 
 | Command | Current behavior | Main output |
 | --- | --- | --- |
-| `ups train` | Records the full APPO launch contract, or creates a deterministic smoke checkpoint with `--reduced`. | `stages/train.json`, checkpoint in reduced mode |
+| `ups train` | Plans or launches the exact 12 APPO jobs; `--plan-only` writes only the registry, while `--sol-smoke` runs one short job. | `population/population_plan.json`, `population/training_report.json` |
 | `ups evaluate` | Records an `AWAITING_CHECKPOINTS` stage. | `stages/evaluate.json` |
 | `ups collect-states` | Creates synthetic mechanics states only with `--reduced`; full mode records `NOT_EXECUTED`. | `states.zarr`, `stages/collect-states.json` |
-| `ups extract-updates` | Records `AWAITING_UPSTREAM_ARTIFACTS`. | `stages/extract-updates.json` |
+| `ups extract-updates` | Converts compatible SOL checkpoints to SafeTensors, or records missing upstream artifacts; exports remain explicitly unqualified. | `weights/*.safetensors`, `weights/extraction.json` |
 | `ups align` | Records `AWAITING_UPSTREAM_ARTIFACTS`. | `stages/align.json` |
 | `ups analyze` | Runs LoRA, permutation, null-invariant, SVD/HOSVD, and metric mechanics checks; it does not download or analyze the four public LoRA repositories yet. | `metrics/functional.parquet`, `bases/mechanics.safetensors`, `evidence.json` |
 | `ups nulls` | Records `AWAITING_UPSTREAM_ARTIFACTS`. | `stages/nulls.json` |

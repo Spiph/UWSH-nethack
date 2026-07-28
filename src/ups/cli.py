@@ -33,8 +33,9 @@ def train(
     reduced: bool = False,
     sol_smoke: bool = False,
     resume: bool = False,
+    plan_only: bool = False,
 ) -> None:
-    typer.echo(run_train(load_config(config), reduced, sol_smoke, resume))
+    typer.echo(run_train(load_config(config), reduced, sol_smoke, resume, plan_only))
 
 
 @app.command()

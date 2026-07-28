@@ -76,6 +76,7 @@ def train(
     reduced: bool = False,
     sol_smoke: bool = False,
     resume: bool = False,
+    plan_only: bool = False,
 ) -> Path:
     """Create deterministic smoke checkpoints or declare the full APPO launch contract."""
     if sol_smoke:
@@ -119,16 +120,7 @@ def train(
             },
         )
     if not reduced:
-        return record_stage(
-            config,
-            "train",
-            {
-                "status": "NOT_EXECUTED",
-                "reason": "full APPO population must run via the pinned rl container",
-                "expected_jobs": len(config.seeds) * len(config.environments),
-                "phase_one_authorized": False,
-            },
-        )
+        return launch_population(config, plan_only=plan_only)
     torch.manual_seed(config.seeds[0])
     model = RecurrentNLEPolicy(glyph_vocab=128, crop_size=5, hidden_size=32)
     checkpoint = config.artifact_root / "checkpoints" / "smoke-policy.pt"
@@ -145,6 +137,118 @@ def train(
         config,
         "train",
         {"status": "SMOKE_ONLY", "checkpoint": str(checkpoint), "full_population": False},
+    )
+
+
+def population_jobs(config: Phase0Config) -> list[dict[str, Any]]:
+    """Create the immutable, duplicate-free 4-task x 3-seed job registry."""
+    jobs: list[dict[str, Any]] = []
+    for environment in config.environments:
+        for seed in config.seeds:
+            slug = environment.removesuffix("-v0").lower()
+            jobs.append(
+                {
+                    "environment": environment,
+                    "seed": seed,
+                    "experiment": f"{config.study}-{slug}-seed{seed}",
+                    "max_environment_steps": config.training.max_environment_steps,
+                    "evaluation_interval": config.training.evaluation_interval,
+                    "evaluation_episodes": config.training.evaluation_episodes,
+                    "minimum_success": config.training.minimum_success,
+                    "cohort": "independent_initialization",
+                    "base_checkpoint": None,
+                }
+            )
+    return jobs
+
+
+def launch_population(config: Phase0Config, plan_only: bool = False) -> Path:
+    """Launch exactly the preregistered jobs in resumable 100k-step chunks.
+
+    The launcher intentionally stops at ``TRAINED_AWAITING_EVALUATION``. No
+    checkpoint becomes a retained policy until the fixed-episode evaluator records
+    the preregistered success threshold.
+    """
+    jobs = population_jobs(config)
+    population_root = config.artifact_root / "population"
+    population_root.mkdir(parents=True, exist_ok=True)
+    plan_path = population_root / "population_plan.json"
+    atomic_json(plan_path, {"config_hash": config.digest, "jobs": jobs})
+    if plan_only:
+        return record_stage(
+            config,
+            "train",
+            {
+                "status": "PLAN_ONLY",
+                "checkpoint": str(population_root),
+                "jobs": jobs,
+                "command": None,
+            },
+        )
+    if config.training.runtime != "sol_patched":
+        raise RuntimeError("the Phase Zero population requires the pinned SOL runtime")
+    if os.environ.get("SOL_COMMIT") != "7c272b66e6ebe72ca008526d33f7e2e40e660af5":
+        raise RuntimeError("run the Phase Zero population inside the pinned research container")
+    job_records: list[dict[str, Any]] = []
+    interval = config.training.evaluation_interval
+    for job in jobs:
+        experiment_root = config.artifact_root / "sample_factory" / job["experiment"]
+        checkpoints: list[dict[str, Any]] = []
+        for target in range(interval, config.training.max_environment_steps + interval, interval):
+            command = [
+                sys.executable,
+                "-m",
+                "ups.sol_train",
+                "--environment",
+                job["environment"],
+                "--seed",
+                str(job["seed"]),
+                "--artifact-root",
+                str(config.artifact_root),
+                "--experiment",
+                job["experiment"],
+                "--max-steps",
+                str(target),
+            ]
+            if target > interval or experiment_root.is_dir():
+                command.append("--resume")
+            subprocess.run(command, check=True)
+            checkpoint = _latest_checkpoint(experiment_root)
+            if checkpoint is None:
+                raise RuntimeError(
+                    f"no checkpoint produced for {job['experiment']} at {target} steps"
+                )
+            checkpoints.append(
+                {
+                    "target_environment_steps": target,
+                    "checkpoint": str(checkpoint),
+                    "checkpoint_sha256": sha256_path(checkpoint),
+                    "command": command,
+                    "evaluation": "AWAITING_FIXED_200_EPISODE_EVALUATION",
+                }
+            )
+        job_records.append({**job, "checkpoints": checkpoints})
+    report = population_root / "training_report.json"
+    atomic_json(
+        report,
+        {
+            "config_hash": config.digest,
+            "jobs": job_records,
+            "status": "TRAINED_AWAITING_EVALUATION",
+            "qualified_population": False,
+        },
+    )
+    return record_stage(
+        config,
+        "train",
+        {
+            "status": "TRAINED_AWAITING_EVALUATION",
+            "checkpoint": str(population_root),
+            "jobs": job_records,
+            "training_report": str(report),
+            "full_population": len(job_records) == len(jobs),
+            "phase_one_authorized": False,
+        },
     )
 
 
