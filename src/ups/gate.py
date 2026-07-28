@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from math import isfinite
 from typing import Any
 
 from ups.config import Phase0Config
@@ -25,11 +26,61 @@ REQUIRED_NUMERICAL_CHECKS = (
     "adapter_svd_hosvd_reproduction",
 )
 
+# These are the Phase Zero negative controls in the governing research plan.
+# A merely spectrum-matched comparison is insufficient: the plan requires the
+# full set to rule out single-matrix rank, marginal statistics, shared bases, and
+# unresolved scratch-network symmetries.
+REQUIRED_NULL_ENSEMBLES = (
+    "gaussian_norm_matched",
+    "spectrum_matched_orientation",
+    "independent_low_rank",
+    "untrained_networks",
+    "element_layer_shuffle",
+    "task_label_permutation",
+    "shared_vs_independent_base",
+    "aligned_vs_unaligned_scratch",
+)
+
+REQUIRED_GEOMETRY_METRICS = (
+    "cross_validated_effective_rank",
+    "explained_variance_curve",
+    "principal_angles",
+    "projection_distance",
+    "subspace_stability",
+)
+
 # Hash of configs/phase0.yaml as preregistered before any evidence was generated.
 PREREGISTERED_PHASE0_CONFIG_HASH = (
     "c2b9d27a22274e5b59c41ad35a4ab9269aefa130f7c603fd11c9e4015b276bb2"
 )
 ARTIFACT_VERIFIER_IMPLEMENTED = False
+
+
+def _finite_number(value: Any) -> bool:
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and isfinite(value)
+
+
+def _has_geometry(evidence: dict[str, Any], module: str) -> bool:
+    geometry = evidence.get("geometry", {})
+    if not isinstance(geometry, dict):
+        return False
+    module_metrics = geometry.get(module, {})
+    if not isinstance(module_metrics, dict):
+        return False
+    return all(
+        name in module_metrics and module_metrics[name] is not None
+        for name in REQUIRED_GEOMETRY_METRICS
+    )
+
+
+def _null_ensemble_counts(completeness: dict[str, Any], minimum: int) -> bool:
+    ensembles = completeness.get("null_ensembles", {})
+    if not isinstance(ensembles, dict):
+        return False
+    return all(
+        isinstance(ensembles.get(name), int) and ensembles[name] >= minimum
+        for name in REQUIRED_NULL_ENSEMBLES
+    )
 
 
 def evaluate_gate(config: Phase0Config, evidence: dict[str, Any]) -> dict[str, Any]:
@@ -82,20 +133,59 @@ def evaluate_gate(config: Phase0Config, evidence: dict[str, Any]) -> dict[str, A
         Check(
             "evaluation_buffer",
             completeness.get("evaluation_sequences") == 512
-            and completeness.get("sequence_length") == 32,
-            [completeness.get("evaluation_sequences"), completeness.get("sequence_length")],
-            "512 sequences x 32 steps",
+            and completeness.get("sequence_length") == 32
+            and completeness.get("common_buffer_replayed") is True,
+            [
+                completeness.get("evaluation_sequences"),
+                completeness.get("sequence_length"),
+                completeness.get("common_buffer_replayed"),
+            ],
+            "512 sequences x 32 steps, replayed identically through original and reconstruction",
+        ),
+        Check(
+            "held_out_construction",
+            completeness.get("leave_one_task_out") is True
+            and completeness.get("cross_validated_rank_selection") is True,
+            [
+                completeness.get("leave_one_task_out"),
+                completeness.get("cross_validated_rank_selection"),
+            ],
+            "training-task-only basis; rank selected by cross-validated variance and function",
+        ),
+        Check(
+            "hierarchical_statistics",
+            completeness.get("hierarchical_bootstrap_tasks_seeds") is True,
+            completeness.get("hierarchical_bootstrap_tasks_seeds"),
+            "task is the generalization unit; hierarchical bootstrap over tasks and seeds",
         ),
         Check(
             "null_replicates",
-            completeness.get("null_replicates", 0) >= 1000,
-            completeness.get("null_replicates"),
-            ">= 1000",
+            completeness.get("null_replicates", 0) >= 1000
+            and _null_ensemble_counts(completeness, config.analysis.null_replicates),
+            completeness.get("null_ensembles"),
+            "all mandatory null/control ensembles with >= 1000 replicates each",
         ),
     ]
     for module in ("encoder", "actor"):
-        low = metrics.get(f"{module}_learned_minus_null_ci_low")
-        checks.append(Check(f"{module}_ci_above_zero", low is not None and low > 0, low, "> 0"))
+        low = metrics.get(f"{module}_learned_minus_spectrum_null_ci_low")
+        checks.extend(
+            (
+                Check(
+                    f"{module}_ci_above_zero",
+                    _finite_number(low) and isinstance(low, (int, float)) and low > 0,
+                    low,
+                    "learned basis beats spectrum-matched orientation with 95% CI lower bound > 0",
+                ),
+                Check(
+                    f"{module}_geometry_reported",
+                    _has_geometry(evidence, module),
+                    evidence.get("geometry", {}).get(module)
+                    if isinstance(evidence.get("geometry"), dict)
+                    else None,
+                    "cross-validated rank, variance curve, angles, projection distance, stability",
+                ),
+            )
+        )
     comparisons = (
         ("null_normalized_median", gate.null_effect_min_sd, ">="),
         ("retention_median", gate.retention_median_min, ">="),
@@ -107,8 +197,10 @@ def evaluate_gate(config: Phase0Config, evidence: dict[str, Any]) -> dict[str, A
     )
     for name, threshold, direction in comparisons:
         value = metrics.get(name)
-        passed = value is not None and (
-            value >= threshold if direction == ">=" else value <= threshold
+        passed = (
+            _finite_number(value)
+            and isinstance(value, (int, float))
+            and (value >= threshold if direction == ">=" else value <= threshold)
         )
         checks.append(Check(name, passed, value, f"{direction} {threshold}"))
     for name in REQUIRED_NUMERICAL_CHECKS:
@@ -120,12 +212,14 @@ def evaluate_gate(config: Phase0Config, evidence: dict[str, Any]) -> dict[str, A
         "schema_version": 1,
         "study": "phase0",
         "decision": "PASS" if passed else "NO_GO",
-        "phase_one_authorized": False,
+        # Authorization is a gate decision, not an instruction to launch Phase One.
+        # Phase One remains outside this repository task even when Gate Zero passes.
+        "phase_one_authorized": passed,
         "config_hash": config.digest,
         "thresholds_immutable": gate.immutable,
         "checks": [check.__dict__ for check in checks],
         "statement": (
-            "Gate Zero passed; Phase One remains outside this task."
+            "Gate Zero passed; Phase One is authorized but is not launched by this task."
             if passed
             else "Gate Zero did not pass. Phase One is explicitly prohibited."
         ),
@@ -151,7 +245,8 @@ def markdown_report(report: dict[str, Any]) -> str:
             "",
             *rows,
             "",
-            "Phase One authorization: **false**.",
+            "Phase One authorization: "
+            f"**{'true' if report['phase_one_authorized'] else 'false'}**.",
             "",
         ]
     )

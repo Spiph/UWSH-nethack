@@ -8,8 +8,14 @@ import torch
 from pydantic import ValidationError
 from safetensors.torch import load_file
 
+import ups.gate as gate_module
 from ups.config import load_config
-from ups.gate import REQUIRED_NUMERICAL_CHECKS, evaluate_gate
+from ups.gate import (
+    REQUIRED_NUMERICAL_CHECKS,
+    _has_geometry,
+    _null_ensemble_counts,
+    evaluate_gate,
+)
 from ups.workflow import (
     _phase0_state_dict,
     extract_updates,
@@ -62,6 +68,56 @@ def test_gate_rejects_self_declared_complete_evidence() -> None:
     # preregistration plus a future artifact verifier. The pure gate evaluator
     # must fail closed rather than treating caller booleans as scientific proof.
     assert evaluate_gate(config, evidence)["decision"] == "NO_GO"
+
+
+def test_gate_requires_all_phase_zero_plan_controls(monkeypatch: pytest.MonkeyPatch) -> None:
+    config = load_config(ROOT / "configs/phase0.yaml")
+    evidence: dict[str, Any] = {
+        "evidence_class": "PREREGISTERED_FULL",
+        "artifact_verification": "VERIFIED",
+        "completeness": {
+            "locked_runtime_compatible": True,
+            "full_population": True,
+            "all_policies_success_ge_075": True,
+            "minimum_policy_success": 0.8,
+            "evaluation_sequences": 512,
+            "sequence_length": 32,
+            "common_buffer_replayed": True,
+            "leave_one_task_out": True,
+            "cross_validated_rank_selection": True,
+            "hierarchical_bootstrap_tasks_seeds": True,
+            "null_replicates": 1000,
+            "null_ensembles": dict.fromkeys(gate_module.REQUIRED_NULL_ENSEMBLES, 1000),
+        },
+        "metrics": {
+            "encoder_learned_minus_spectrum_null_ci_low": 0.1,
+            "actor_learned_minus_spectrum_null_ci_low": 0.1,
+            "null_normalized_median": 2.1,
+            "retention_median": 0.91,
+            "retention_ci_low": 0.81,
+            "action_kl": 0.04,
+            "action_agreement": 0.96,
+            "feature_cka": 0.91,
+            "normalized_value_rmse": 0.09,
+        },
+        "geometry": {
+            module: dict.fromkeys(gate_module.REQUIRED_GEOMETRY_METRICS, 1.0)
+            for module in ("encoder", "actor")
+        },
+        "numerical_checks": dict.fromkeys(REQUIRED_NUMERICAL_CHECKS, True),
+    }
+    monkeypatch.setattr(gate_module, "ARTIFACT_VERIFIER_IMPLEMENTED", True)
+    report = evaluate_gate(config, evidence)
+    assert report["decision"] == "PASS"
+    assert report["phase_one_authorized"] is True
+    evidence["completeness"]["null_ensembles"].pop("independent_low_rank")
+    assert evaluate_gate(config, evidence)["decision"] == "NO_GO"
+
+
+def test_gate_contract_rejects_missing_geometry_and_control_manifests() -> None:
+    assert _has_geometry({"geometry": None}, "encoder") is False
+    assert _has_geometry({"geometry": {"encoder": None}}, "encoder") is False
+    assert _null_ensemble_counts({"null_ensembles": None}, 1000) is False
 
 
 def test_reduced_reproduction_is_no_go(tmp_path: Path) -> None:
