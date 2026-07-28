@@ -4,11 +4,19 @@ from types import SimpleNamespace
 from typing import Any
 
 import pytest
+import torch
 from pydantic import ValidationError
+from safetensors.torch import load_file
 
 from ups.config import load_config
 from ups.gate import REQUIRED_NUMERICAL_CHECKS, evaluate_gate
-from ups.workflow import reproduce, train, validate_existing_stage
+from ups.workflow import (
+    _phase0_state_dict,
+    extract_updates,
+    reproduce,
+    train,
+    validate_existing_stage,
+)
 
 ROOT = Path(__file__).parents[1]
 
@@ -89,3 +97,50 @@ def test_sol_smoke_launch_records_sample_factory_artifact(
     payload = json.loads(stage.read_text())
     assert payload["status"] == "SMOKE_ONLY"
     assert payload["command"][-1] == "--smoke"
+
+
+def test_extract_sol_checkpoint_to_safetensors(tmp_path: Path) -> None:
+    config = load_config(ROOT / "configs/smoke.yaml").model_copy(
+        update={"artifact_root": tmp_path / "run"}
+    )
+    experiment = config.artifact_root / "sample_factory" / "smoke"
+    checkpoint = experiment / "checkpoint_p0" / "checkpoint_000000001_32.pth"
+    checkpoint.parent.mkdir(parents=True)
+    (experiment / "config.json").write_text(
+        json.dumps({"env": config.environments[0], "seed": config.seeds[0]})
+    )
+    state = {
+        "encoder.glyph_embedding.weight": torch.zeros(6000, 32),
+        "encoder.cnn.0.weight": torch.zeros(64, 32, 3, 3),
+        "encoder.cnn.2.weight": torch.zeros(64, 64, 3, 3),
+        "encoder.cnn.4.weight": torch.zeros(64, 64, 3, 3),
+        "encoder.projection.weight": torch.zeros(256, 5211),
+        "core.core.weight_ih_l0": torch.zeros(768, 256),
+        "critic_linear.weight": torch.zeros(1, 256),
+        "action_parameterization.distribution_linear.weight": torch.zeros(8, 256),
+    }
+    torch.save({"model": state, "train_step": 1, "env_steps": 32}, checkpoint)
+    stage = extract_updates(config)
+    payload = json.loads(stage.read_text())
+    assert payload["status"] == "EXTRACTED_UNQUALIFIED"
+    exported = next((config.artifact_root / "weights").glob("*.safetensors"))
+    assert load_file(exported)["encoder.projection.weight"].shape == (256, 5211)
+
+
+def test_checkpoint_extraction_rejects_invalid_models() -> None:
+    with pytest.raises(ValueError, match="no model"):
+        _phase0_state_dict({})
+    with pytest.raises(ValueError, match="missing"):
+        _phase0_state_dict({"model": {}})
+    state = {
+        "encoder.glyph_embedding.weight": torch.zeros(6000, 32),
+        "encoder.cnn.0.weight": torch.zeros(64, 32, 3, 3),
+        "encoder.cnn.2.weight": torch.zeros(64, 64, 3, 3),
+        "encoder.cnn.4.weight": torch.zeros(64, 64, 3, 3),
+        "encoder.projection.weight": torch.zeros(256, 5211),
+        "core.core.weight_ih_l0": torch.zeros(768, 256),
+        "critic_linear.weight": torch.zeros(1, 256),
+        "action_parameterization.distribution_linear.weight": torch.zeros(7, 256),
+    }
+    with pytest.raises(ValueError, match="eight-action"):
+        _phase0_state_dict({"model": state})

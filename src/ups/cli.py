@@ -10,6 +10,7 @@ from ups.artifacts import write_manifest
 from ups.config import load_config
 from ups.workflow import analyze as run_analyze
 from ups.workflow import collect_states as run_collect_states
+from ups.workflow import extract_updates as run_extract_updates
 from ups.workflow import gate as run_gate
 from ups.workflow import record_stage
 from ups.workflow import reproduce as run_reproduce
@@ -57,7 +58,7 @@ def placeholder(command: str, config: Path) -> None:
 
 @app.command("extract-updates")
 def extract_updates(config: Path = typer.Option(config_option(), exists=True)) -> None:
-    placeholder("extract-updates", config)
+    typer.echo(run_extract_updates(load_config(config)))
 
 
 @app.command()

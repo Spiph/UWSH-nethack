@@ -19,6 +19,7 @@ import pandas as pd  # type: ignore[import-untyped]
 import torch
 import zarr  # type: ignore[import-untyped]
 from safetensors.numpy import save_file
+from safetensors.torch import save_file as save_torch_file
 
 from ups.alignment import permute_mlp
 from ups.artifacts import atomic_json, sha256_path, write_manifest
@@ -136,6 +137,104 @@ def train(config: Phase0Config, reduced: bool = False, sol_smoke: bool = False) 
         config,
         "train",
         {"status": "SMOKE_ONLY", "checkpoint": str(checkpoint), "full_population": False},
+    )
+
+
+def _latest_checkpoint(experiment: Path) -> Path | None:
+    checkpoints = sorted(experiment.glob("checkpoint_p0/checkpoint_*.pth"))
+    return checkpoints[-1] if checkpoints else None
+
+
+def _phase0_state_dict(payload: dict[str, Any]) -> dict[str, torch.Tensor]:
+    model = payload.get("model")
+    if not isinstance(model, dict):
+        raise ValueError("Sample Factory checkpoint has no model state dictionary")
+    state = {
+        name: value.detach().cpu().contiguous()
+        for name, value in model.items()
+        if isinstance(value, torch.Tensor)
+    }
+    required = {
+        "encoder.glyph_embedding.weight",
+        "encoder.cnn.0.weight",
+        "encoder.cnn.2.weight",
+        "encoder.cnn.4.weight",
+        "encoder.projection.weight",
+        "core.core.weight_ih_l0",
+        "critic_linear.weight",
+        "action_parameterization.distribution_linear.weight",
+    }
+    missing = sorted(required - state.keys())
+    if missing:
+        raise ValueError(f"incompatible Phase Zero Sample Factory checkpoint; missing {missing}")
+    if tuple(state["action_parameterization.distribution_linear.weight"].shape) != (8, 256):
+        raise ValueError(
+            "checkpoint does not expose the required eight-action, 256-unit policy head"
+        )
+    return state
+
+
+def extract_updates(config: Phase0Config) -> Path:
+    """Convert SOL checkpoints to SafeTensors without treating them as qualified policies."""
+    source = config.artifact_root / "sample_factory"
+    export_root = config.artifact_root / "weights"
+    expected = {(environment, seed) for environment in config.environments for seed in config.seeds}
+    seen: set[tuple[str, int]] = set()
+    records: list[dict[str, Any]] = []
+    if source.is_dir():
+        for experiment in sorted(path for path in source.iterdir() if path.is_dir()):
+            config_path = experiment / "config.json"
+            checkpoint = _latest_checkpoint(experiment)
+            if not config_path.is_file() or checkpoint is None:
+                continue
+            with config_path.open(encoding="utf-8") as stream:
+                sf_config = json.load(stream)
+            environment, seed = sf_config.get("env"), sf_config.get("seed")
+            if not isinstance(environment, str) or not isinstance(seed, int):
+                raise ValueError(f"invalid Sample Factory config at {config_path}")
+            if (environment, seed) not in expected:
+                continue
+            payload = torch.load(checkpoint, map_location="cpu")
+            state = _phase0_state_dict(payload)
+            destination = export_root / f"{environment.removesuffix('-v0')}-seed{seed}.safetensors"
+            destination.parent.mkdir(parents=True, exist_ok=True)
+            save_torch_file(
+                state, str(destination), metadata={"format": "sol-sample-factory-phase0-v1"}
+            )
+            metadata_path = destination.with_suffix(".json")
+            atomic_json(
+                metadata_path,
+                {
+                    "environment": environment,
+                    "seed": seed,
+                    "checkpoint": str(checkpoint),
+                    "checkpoint_sha256": sha256_path(checkpoint),
+                    "weights": str(destination),
+                    "state_keys": sorted(state),
+                    "train_step": payload.get("train_step"),
+                    "environment_steps": payload.get("env_steps"),
+                },
+            )
+            records.append(json.loads(metadata_path.read_text(encoding="utf-8")))
+            seen.add((environment, seed))
+    missing = sorted(f"{environment}:seed{seed}" for environment, seed in expected - seen)
+    report = export_root / "extraction.json"
+    atomic_json(
+        report,
+        {
+            "config_hash": config.digest,
+            "records": records,
+            "expected_population": len(expected),
+            "extracted_population": len(seen),
+            "missing": missing,
+            "qualified_population": False,
+        },
+    )
+    status = "EXTRACTED_UNQUALIFIED" if records else "AWAITING_UPSTREAM_ARTIFACTS"
+    return record_stage(
+        config,
+        "extract-updates",
+        {"status": status, "checkpoint": str(export_root), "extraction_report": str(report)},
     )
 
 
