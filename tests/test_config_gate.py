@@ -16,6 +16,7 @@ from ups.gate import (
     _null_ensemble_counts,
     evaluate_gate,
 )
+from ups.verifier import _manifest_checks, _population_checks, verify_artifacts
 from ups.workflow import (
     _phase0_state_dict,
     extract_updates,
@@ -106,10 +107,10 @@ def test_gate_requires_all_phase_zero_plan_controls(monkeypatch: pytest.MonkeyPa
         },
         "numerical_checks": dict.fromkeys(REQUIRED_NUMERICAL_CHECKS, True),
     }
-    monkeypatch.setattr(gate_module, "ARTIFACT_VERIFIER_IMPLEMENTED", True)
     report = evaluate_gate(config, evidence)
-    assert report["decision"] == "PASS"
-    assert report["phase_one_authorized"] is True
+    assert report["decision"] == "NO_GO"
+    assert report["phase_one_authorized"] is False
+    assert "manifest" in str(report["checks"][0]["observed"])
     evidence["completeness"]["null_ensembles"].pop("independent_low_rank")
     assert evaluate_gate(config, evidence)["decision"] == "NO_GO"
 
@@ -118,6 +119,117 @@ def test_gate_contract_rejects_missing_geometry_and_control_manifests() -> None:
     assert _has_geometry({"geometry": None}, "encoder") is False
     assert _has_geometry({"geometry": {"encoder": None}}, "encoder") is False
     assert _null_ensemble_counts({"null_ensembles": None}, 1000) is False
+
+
+def test_verifier_rejects_stale_nonfinite_and_malformed_evidence(tmp_path: Path) -> None:
+    config = load_config(ROOT / "configs/smoke.yaml").model_copy(
+        update={"artifact_root": tmp_path / "run"}
+    )
+    result = verify_artifacts(
+        config,
+        {
+            "config_hash": "stale",
+            "evidence_class": "SMOKE_ONLY",
+            "metrics": {"bad": float("nan")},
+            "completeness": [],
+        },
+    )
+    assert result["verified"] is False
+    assert "evidence config hash is stale or missing" in result["failures"]
+    assert "evidence contains non-finite values" in result["failures"]
+
+
+def test_verifier_accepts_intact_provenance_shell(tmp_path: Path) -> None:
+    config = load_config(ROOT / "configs/smoke.yaml").model_copy(
+        update={"artifact_root": tmp_path / "run"}
+    )
+    manifests = config.artifact_root / "manifests"
+    manifests.mkdir(parents=True)
+    for prefix in (
+        "train",
+        "evaluate",
+        "collect-states",
+        "extract-updates",
+        "align",
+        "analyze",
+        "nulls",
+        "reconstruct",
+    ):
+        (manifests / f"{prefix}-fixture.json").write_text(
+            json.dumps({"config_hash": config.digest, "outputs": []})
+        )
+    weights = config.artifact_root / "weights"
+    weights.mkdir(parents=True)
+    (weights / "extraction.json").write_text(
+        json.dumps(
+            {
+                "expected_population": len(config.environments) * len(config.seeds),
+                "extracted_population": len(config.environments) * len(config.seeds),
+                "qualified_population": True,
+            }
+        )
+    )
+    result = verify_artifacts(
+        config,
+        {
+            "config_hash": config.digest,
+            "evidence_class": "PREREGISTERED_FULL",
+            "completeness": {
+                "seed_leakage_detected": False,
+                "null_invariants_verified": True,
+            },
+        },
+    )
+    assert result["verified"] is True
+
+
+def test_verifier_reports_manifest_and_population_corruption(tmp_path: Path) -> None:
+    config = load_config(ROOT / "configs/smoke.yaml").model_copy(
+        update={"artifact_root": tmp_path / "run"}
+    )
+    manifests = config.artifact_root / "manifests"
+    manifests.mkdir(parents=True)
+    for prefix in (
+        "train",
+        "evaluate",
+        "collect-states",
+        "extract-updates",
+        "align",
+        "analyze",
+        "nulls",
+        "reconstruct",
+    ):
+        (manifests / f"{prefix}-fixture.json").write_text(
+            json.dumps({"config_hash": config.digest, "outputs": []})
+        )
+    (manifests / "invalid.json").write_text("{")
+    (manifests / "stale.json").write_text(
+        json.dumps({"config_hash": "stale", "outputs": "not-a-list"})
+    )
+    (manifests / "records.json").write_text(
+        json.dumps(
+            {
+                "config_hash": config.digest,
+                "outputs": [None, {"path": str(tmp_path / "missing"), "sha256": "x"}],
+            }
+        )
+    )
+    (manifests / "wrong-hash.json").write_text(
+        json.dumps(
+            {
+                "config_hash": config.digest,
+                "outputs": [{"path": str(manifests / "train-fixture.json"), "sha256": "wrong"}],
+            }
+        )
+    )
+    assert _manifest_checks(config)[0] is False
+    weights = config.artifact_root / "weights"
+    weights.mkdir(parents=True)
+    report = weights / "extraction.json"
+    report.write_text("{")
+    assert _population_checks(config)[0] is False
+    report.write_text(json.dumps({"expected_population": 0, "extracted_population": 0}))
+    assert _population_checks(config)[0] is False
 
 
 def test_reduced_reproduction_is_no_go(tmp_path: Path) -> None:

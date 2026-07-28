@@ -7,6 +7,7 @@ from math import isfinite
 from typing import Any
 
 from ups.config import Phase0Config
+from ups.verifier import verify_artifacts
 
 
 @dataclass(frozen=True)
@@ -53,7 +54,7 @@ REQUIRED_GEOMETRY_METRICS = (
 PREREGISTERED_PHASE0_CONFIG_HASH = (
     "c2b9d27a22274e5b59c41ad35a4ab9269aefa130f7c603fd11c9e4015b276bb2"
 )
-ARTIFACT_VERIFIER_IMPLEMENTED = False
+ARTIFACT_VERIFIER_IMPLEMENTED = True
 
 
 def _finite_number(value: Any) -> bool:
@@ -86,10 +87,11 @@ def _null_ensemble_counts(completeness: dict[str, Any], minimum: int) -> bool:
 def evaluate_gate(config: Phase0Config, evidence: dict[str, Any]) -> dict[str, Any]:
     """Evaluate preregistered checks. Missing evidence is always a failed check."""
     gate = config.gate
+    verification = verify_artifacts(config, evidence)
     admissible = (
         ARTIFACT_VERIFIER_IMPLEMENTED
         and evidence.get("evidence_class") == "PREREGISTERED_FULL"
-        and evidence.get("artifact_verification") == "VERIFIED"
+        and verification["verified"]
     )
     metrics = evidence.get("metrics", {}) if admissible else {}
     numerical = evidence.get("numerical_checks", {})
@@ -103,7 +105,7 @@ def evaluate_gate(config: Phase0Config, evidence: dict[str, Any]) -> dict[str, A
         Check(
             "evidence_class",
             admissible,
-            [evidence.get("evidence_class"), evidence.get("artifact_verification")],
+            [evidence.get("evidence_class"), verification],
             "PREREGISTERED_FULL with independently VERIFIED artifacts",
         ),
         Check(
