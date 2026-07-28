@@ -134,7 +134,16 @@ def _evaluation_checks(config: Phase0Config) -> tuple[bool, list[str]]:
         return False, [f"invalid evaluation artifacts: {error}"]
     if report.get("config_hash") != config.digest:
         failures.append("stale config hash in evaluation report")
-    required = {"environment", "seed", "target_environment_steps", "success_rate"}
+    if report.get("episodes_per_checkpoint") != config.training.evaluation_episodes:
+        failures.append("evaluation report has wrong fixed episode count")
+    required = {
+        "environment",
+        "seed",
+        "target_environment_steps",
+        "success_rate",
+        "episodes",
+        "evaluation_table",
+    }
     if not required.issubset(table.columns):
         failures.append("evaluation registry is missing required columns")
         return False, failures
@@ -145,6 +154,12 @@ def _evaluation_checks(config: Phase0Config) -> tuple[bool, list[str]]:
         failures.append("evaluation registry final task/seed pairs are incomplete or duplicated")
     if table[list(required)].isnull().any().any():
         failures.append("evaluation registry contains null required values")
+    for raw_table, episodes in zip(table["evaluation_table"], table["episodes"], strict=False):
+        raw_path = Path(str(raw_table))
+        if not raw_path.is_file():
+            failures.append(f"missing raw evaluation table: {raw_path}")
+        elif not isinstance(episodes, int) or episodes != config.training.evaluation_episodes:
+            failures.append("evaluation record has wrong episode count")
     if (
         not table["success_rate"]
         .map(lambda value: isinstance(value, (int, float)) and isfinite(value))

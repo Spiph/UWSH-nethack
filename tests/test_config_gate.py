@@ -187,6 +187,8 @@ def test_verifier_accepts_intact_provenance_shell(tmp_path: Path) -> None:
     )
     evaluations = config.artifact_root / "evaluations"
     evaluations.mkdir(parents=True)
+    raw_table = evaluations / "raw.parquet"
+    pd.DataFrame({"success": [True]}).to_parquet(raw_table, index=False)
     pd.DataFrame(
         [
             {
@@ -194,10 +196,19 @@ def test_verifier_accepts_intact_provenance_shell(tmp_path: Path) -> None:
                 "seed": config.seeds[0],
                 "target_environment_steps": config.training.max_environment_steps,
                 "success_rate": 1.0,
+                "episodes": config.training.evaluation_episodes,
+                "evaluation_table": str(raw_table),
             }
         ]
     ).to_parquet(evaluations / "policy_registry.parquet", index=False)
-    (evaluations / "evaluation_report.json").write_text(json.dumps({"config_hash": config.digest}))
+    (evaluations / "evaluation_report.json").write_text(
+        json.dumps(
+            {
+                "config_hash": config.digest,
+                "episodes_per_checkpoint": config.training.evaluation_episodes,
+            }
+        )
+    )
     result = verify_artifacts(
         config,
         {
@@ -210,6 +221,18 @@ def test_verifier_accepts_intact_provenance_shell(tmp_path: Path) -> None:
         },
     )
     assert result["verified"] is True
+    raw_table.unlink()
+    assert verify_artifacts(
+        config,
+        {
+            "config_hash": config.digest,
+            "evidence_class": "PREREGISTERED_FULL",
+            "completeness": {
+                "seed_leakage_detected": False,
+                "null_invariants_verified": True,
+            },
+        },
+    )["verified"] is False
 
 
 def test_verifier_reports_manifest_and_population_corruption(tmp_path: Path) -> None:

@@ -338,6 +338,8 @@ def evaluate(config: Phase0Config) -> Path:
                     **checkpoint_record,
                     "success_rate": summary["success_rate"],
                     "median_return": summary["median_return"],
+                    "episodes": summary.get("episodes"),
+                    "evaluation_table": summary.get("table"),
                     "qualified": summary["success_rate"] >= config.training.minimum_success,
                 }
             )
