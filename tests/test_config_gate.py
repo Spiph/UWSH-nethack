@@ -149,10 +149,12 @@ def test_sol_smoke_launch_records_sample_factory_artifact(
         (config.artifact_root / "sample_factory" / experiment).mkdir(parents=True)
 
     monkeypatch.setattr("ups.workflow.subprocess", SimpleNamespace(run=fake_run))
-    stage = train(config, sol_smoke=True)
+    stage = train(config, sol_smoke=True, resume=True)
     payload = json.loads(stage.read_text())
     assert payload["status"] == "SMOKE_ONLY"
-    assert payload["command"][-1] == "--smoke"
+    assert "--smoke" in payload["command"]
+    assert payload["command"][-1] == "--resume"
+    assert payload["resume"] is True
 
 
 def test_extract_sol_checkpoint_to_safetensors(tmp_path: Path) -> None:

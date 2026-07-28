@@ -71,7 +71,12 @@ def validate_existing_stage(config: Phase0Config, name: str) -> bool:
     return True
 
 
-def train(config: Phase0Config, reduced: bool = False, sol_smoke: bool = False) -> Path:
+def train(
+    config: Phase0Config,
+    reduced: bool = False,
+    sol_smoke: bool = False,
+    resume: bool = False,
+) -> Path:
     """Create deterministic smoke checkpoints or declare the full APPO launch contract."""
     if sol_smoke:
         if config.training.runtime != "sol_patched":
@@ -98,6 +103,8 @@ def train(config: Phase0Config, reduced: bool = False, sol_smoke: bool = False) 
             str(config.training.max_environment_steps),
             "--smoke",
         ]
+        if resume:
+            command.append("--resume")
         subprocess.run(command, check=True)
         checkpoint_root = config.artifact_root / "sample_factory" / experiment
         return record_stage(
@@ -108,6 +115,7 @@ def train(config: Phase0Config, reduced: bool = False, sol_smoke: bool = False) 
                 "checkpoint": str(checkpoint_root),
                 "full_population": False,
                 "command": command,
+                "resume": resume,
             },
         )
     if not reduced:

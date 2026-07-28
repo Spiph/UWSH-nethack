@@ -32,8 +32,9 @@ def train(
     config: Path = typer.Option(config_option(), exists=True),
     reduced: bool = False,
     sol_smoke: bool = False,
+    resume: bool = False,
 ) -> None:
-    typer.echo(run_train(load_config(config), reduced, sol_smoke))
+    typer.echo(run_train(load_config(config), reduced, sol_smoke, resume))
 
 
 @app.command()

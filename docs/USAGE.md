@@ -133,6 +133,14 @@ docker compose run --rm research-cpu \
   train --config configs/smoke.yaml --sol-smoke
 ```
 
+Resume the same named Sample Factory experiment through the stable CLI with
+`--resume`:
+
+```bash
+docker compose run --rm research-cpu \
+  train --config configs/smoke.yaml --sol-smoke --resume
+```
+
 `--smoke` caps the job at 256 environment steps. It validates the SOL/NLE/APPO
 integration only; it is not a retained policy or Gate Zero evidence. Omit
 `--smoke` and use `research-gpu` only after the smoke run has produced a valid
