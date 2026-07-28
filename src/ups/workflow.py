@@ -304,17 +304,19 @@ def evaluate(config: Phase0Config) -> Path:
     table_path = config.artifact_root / "evaluations" / "policy_registry.parquet"
     pd.DataFrame(summaries).to_parquet(table_path, index=False)
     evaluation_report = config.artifact_root / "evaluations" / "evaluation_report.json"
-    qualified_final = all(
-        row["qualified"]
-        and row["target_environment_steps"] == config.training.max_environment_steps
+    final_summaries = [
+        row
         for row in summaries
-    ) and len(
-        {
-            (row["environment"], row["seed"])
-            for row in summaries
-            if row["target_environment_steps"] == config.training.max_environment_steps
-        }
-    ) == len(population_jobs(config))
+        if row["target_environment_steps"] == config.training.max_environment_steps
+    ]
+    final_pairs = {(row["environment"], row["seed"]) for row in final_summaries}
+    expected_pairs = {(job["environment"], job["seed"]) for job in population_jobs(config)}
+    qualified_final = (
+        bool(final_summaries)
+        and len(final_pairs) == len(expected_pairs)
+        and final_pairs == expected_pairs
+        and all(row["qualified"] for row in final_summaries)
+    )
     atomic_json(
         evaluation_report,
         {
