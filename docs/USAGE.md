@@ -161,7 +161,7 @@ All commands accept `--config PATH`; the default is `configs/phase0.yaml`.
 | Command | Current behavior | Main output |
 | --- | --- | --- |
 | `ups train` | Plans or launches the exact 12 APPO jobs; `--plan-only` writes only the registry, while `--sol-smoke` runs one short job. | `population/population_plan.json`, `population/training_report.json` |
-| `ups evaluate` | Records an `AWAITING_CHECKPOINTS` stage. | `stages/evaluate.json` |
+| `ups evaluate` | Replays each recorded checkpoint on fixed per-task evaluation seeds (200 episodes in the full config), writes the policy registry, and marks the population qualified or unqualified. If training has not produced a report, records `AWAITING_CHECKPOINTS`. | `evaluations/policy_registry.parquet`, `evaluations/evaluation_report.json`, `stages/evaluate.json` |
 | `ups collect-states` | Creates synthetic mechanics states only with `--reduced`; full mode records `NOT_EXECUTED`. | `states.zarr`, `stages/collect-states.json` |
 | `ups extract-updates` | Converts compatible SOL checkpoints to SafeTensors, or records missing upstream artifacts; exports remain explicitly unqualified. | `weights/*.safetensors`, `weights/extraction.json` |
 | `ups align` | Records `AWAITING_UPSTREAM_ARTIFACTS`. | `stages/align.json` |

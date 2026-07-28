@@ -19,6 +19,7 @@ from ups.gate import (
 from ups.verifier import _manifest_checks, _population_checks, verify_artifacts
 from ups.workflow import (
     _phase0_state_dict,
+    evaluate,
     extract_updates,
     launch_population,
     population_jobs,
@@ -315,6 +316,52 @@ def test_population_launcher_records_resumable_chunks(
     payload = json.loads(stage.read_text())
     assert payload["status"] == "TRAINED_AWAITING_EVALUATION"
     assert len(payload["jobs"][0]["checkpoints"]) == 2
+
+
+def test_evaluator_replays_fixed_episodes_and_writes_registry(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = load_config(ROOT / "configs/smoke.yaml").model_copy(
+        update={"artifact_root": tmp_path / "run"}
+    )
+    monkeypatch.setenv("SOL_COMMIT", "7c272b66e6ebe72ca008526d33f7e2e40e660af5")
+    checkpoint = tmp_path / "checkpoint.pth"
+    checkpoint.write_text("checkpoint")
+    training = {
+        "jobs": [
+            {
+                "environment": config.environments[0],
+                "seed": 0,
+                "experiment": "phase0-smoke-random-seed0",
+                "checkpoints": [
+                    {
+                        "target_environment_steps": config.training.max_environment_steps,
+                        "checkpoint": str(checkpoint),
+                    }
+                ],
+            }
+        ]
+    }
+    population = config.artifact_root / "population"
+    population.mkdir(parents=True)
+    (population / "training_report.json").write_text(json.dumps(training))
+
+    def fake_run(command: list[str], check: bool) -> None:
+        assert check is True
+        experiment = command[command.index("--experiment") + 1]
+        evaluations = config.artifact_root / "evaluations"
+        evaluations.mkdir(parents=True, exist_ok=True)
+        (evaluations / f"{experiment}.json").write_text(
+            json.dumps({"success_rate": 0.5, "median_return": 1.0})
+        )
+
+    monkeypatch.setattr("ups.workflow.subprocess", SimpleNamespace(run=fake_run))
+    stage = evaluate(config)
+    payload = json.loads(stage.read_text())
+    assert payload["status"] == "EVALUATED_UNQUALIFIED"
+    report = json.loads((config.artifact_root / "evaluations/evaluation_report.json").read_text())
+    assert report["records"] == 1
+    assert (config.artifact_root / "evaluations/policy_registry.parquet").is_file()
 
 
 def test_extract_sol_checkpoint_to_safetensors(tmp_path: Path) -> None:

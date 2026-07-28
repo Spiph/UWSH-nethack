@@ -252,6 +252,92 @@ def launch_population(config: Phase0Config, plan_only: bool = False) -> Path:
     )
 
 
+def evaluate(config: Phase0Config) -> Path:
+    """Evaluate every recorded checkpoint on its fixed 200-episode task seeds."""
+    report_path = config.artifact_root / "population" / "training_report.json"
+    if not report_path.is_file():
+        return record_stage(config, "evaluate", {"status": "AWAITING_CHECKPOINTS"})
+    if os.environ.get("SOL_COMMIT") != "7c272b66e6ebe72ca008526d33f7e2e40e660af5":
+        raise RuntimeError("Phase Zero evaluation must run in the pinned SOL container")
+    training = json.loads(report_path.read_text(encoding="utf-8"))
+    fixed_seeds = dict(zip(config.environments, config.evaluation_buffer.fixed_seeds, strict=True))
+    summaries: list[dict[str, Any]] = []
+    for job in training.get("jobs", []):
+        for checkpoint_record in job.get("checkpoints", []):
+            command = [
+                sys.executable,
+                "-m",
+                "ups.sol_evaluate",
+                "--checkpoint",
+                checkpoint_record["checkpoint"],
+                "--episodes",
+                str(config.training.evaluation_episodes),
+                "--eval-seed",
+                str(fixed_seeds[job["environment"]]),
+                "--artifact-root",
+                str(config.artifact_root),
+                "--environment",
+                job["environment"],
+                "--experiment",
+                f"{job['experiment']}-step{checkpoint_record['target_environment_steps']}",
+            ]
+            subprocess.run(command, check=True)
+            summary = json.loads(
+                (
+                    config.artifact_root
+                    / "evaluations"
+                    / (
+                        f"{job['experiment']}-step"
+                        f"{checkpoint_record['target_environment_steps']}.json"
+                    )
+                ).read_text(encoding="utf-8")
+            )
+            summaries.append(
+                {
+                    **job,
+                    **checkpoint_record,
+                    "success_rate": summary["success_rate"],
+                    "median_return": summary["median_return"],
+                    "qualified": summary["success_rate"] >= config.training.minimum_success,
+                }
+            )
+    table_path = config.artifact_root / "evaluations" / "policy_registry.parquet"
+    pd.DataFrame(summaries).to_parquet(table_path, index=False)
+    evaluation_report = config.artifact_root / "evaluations" / "evaluation_report.json"
+    qualified_final = all(
+        row["qualified"]
+        and row["target_environment_steps"] == config.training.max_environment_steps
+        for row in summaries
+    ) and len(
+        {
+            (row["environment"], row["seed"])
+            for row in summaries
+            if row["target_environment_steps"] == config.training.max_environment_steps
+        }
+    ) == len(population_jobs(config))
+    atomic_json(
+        evaluation_report,
+        {
+            "config_hash": config.digest,
+            "episodes_per_checkpoint": config.training.evaluation_episodes,
+            "fixed_eval_seeds": fixed_seeds,
+            "records": len(summaries),
+            "qualified_population": qualified_final,
+            "policy_registry": str(table_path),
+        },
+    )
+    return record_stage(
+        config,
+        "evaluate",
+        {
+            "status": "QUALIFIED" if qualified_final else "EVALUATED_UNQUALIFIED",
+            "checkpoint": str(config.artifact_root / "evaluations"),
+            "evaluation_report": str(evaluation_report),
+            "qualified_population": qualified_final,
+        },
+    )
+
+
 def _latest_checkpoint(experiment: Path) -> Path | None:
     checkpoints = sorted(experiment.glob("checkpoint_p0/checkpoint_*.pth"))
     return checkpoints[-1] if checkpoints else None

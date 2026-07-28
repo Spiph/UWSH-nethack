@@ -10,6 +10,7 @@ from ups.artifacts import write_manifest
 from ups.config import load_config
 from ups.workflow import analyze as run_analyze
 from ups.workflow import collect_states as run_collect_states
+from ups.workflow import evaluate as run_evaluate
 from ups.workflow import extract_updates as run_extract_updates
 from ups.workflow import gate as run_gate
 from ups.workflow import record_stage
@@ -41,7 +42,7 @@ def train(
 @app.command()
 def evaluate(config: Path = typer.Option(config_option(), exists=True)) -> None:
     cfg = load_config(config)
-    typer.echo(record_stage(cfg, "evaluate", {"status": "AWAITING_CHECKPOINTS"}))
+    typer.echo(run_evaluate(cfg))
 
 
 @app.command("collect-states")
