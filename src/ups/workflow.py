@@ -375,7 +375,7 @@ def _phase0_state_dict(payload: dict[str, Any]) -> dict[str, torch.Tensor]:
 
 
 def extract_updates(config: Phase0Config) -> Path:
-    """Convert SOL checkpoints to SafeTensors without treating them as qualified policies."""
+    """Convert SOL checkpoints to SafeTensors and propagate fixed-eval qualification."""
     source = config.artifact_root / "sample_factory"
     export_root = config.artifact_root / "weights"
     expected = {(environment, seed) for environment in config.environments for seed in config.seeds}
@@ -418,6 +418,18 @@ def extract_updates(config: Phase0Config) -> Path:
             records.append(json.loads(metadata_path.read_text(encoding="utf-8")))
             seen.add((environment, seed))
     missing = sorted(f"{environment}:seed{seed}" for environment, seed in expected - seen)
+    evaluation_report = config.artifact_root / "evaluations" / "evaluation_report.json"
+    qualified_population = False
+    if evaluation_report.is_file():
+        try:
+            evaluation = json.loads(evaluation_report.read_text(encoding="utf-8"))
+            qualified_population = (
+                evaluation.get("config_hash") == config.digest
+                and evaluation.get("qualified_population") is True
+                and not missing
+            )
+        except (OSError, json.JSONDecodeError):
+            qualified_population = False
     report = export_root / "extraction.json"
     atomic_json(
         report,
@@ -427,10 +439,17 @@ def extract_updates(config: Phase0Config) -> Path:
             "expected_population": len(expected),
             "extracted_population": len(seen),
             "missing": missing,
-            "qualified_population": False,
+            "qualified_population": qualified_population,
+            "qualification_source": str(evaluation_report) if evaluation_report.is_file() else None,
         },
     )
-    status = "EXTRACTED_UNQUALIFIED" if records else "AWAITING_UPSTREAM_ARTIFACTS"
+    status = (
+        "EXTRACTED_QUALIFIED"
+        if records and qualified_population
+        else "EXTRACTED_UNQUALIFIED"
+        if records
+        else "AWAITING_UPSTREAM_ARTIFACTS"
+    )
     return record_stage(
         config,
         "extract-updates",

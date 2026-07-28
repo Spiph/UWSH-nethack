@@ -410,11 +410,43 @@ def test_extract_sol_checkpoint_to_safetensors(tmp_path: Path) -> None:
         "action_parameterization.distribution_linear.weight": torch.zeros(8, 256),
     }
     torch.save({"model": state, "train_step": 1, "env_steps": 32}, checkpoint)
+    evaluations = config.artifact_root / "evaluations"
+    evaluations.mkdir(parents=True)
+    (evaluations / "evaluation_report.json").write_text(
+        json.dumps({"config_hash": config.digest, "qualified_population": True})
+    )
     stage = extract_updates(config)
     payload = json.loads(stage.read_text())
-    assert payload["status"] == "EXTRACTED_UNQUALIFIED"
+    assert payload["status"] == "EXTRACTED_QUALIFIED"
     exported = next((config.artifact_root / "weights").glob("*.safetensors"))
     assert load_file(exported)["encoder.projection.weight"].shape == (256, 5211)
+
+
+def test_extraction_propagates_qualified_evaluation(tmp_path: Path) -> None:
+    config = load_config(ROOT / "configs/smoke.yaml").model_copy(
+        update={"artifact_root": tmp_path / "run"}
+    )
+    evaluations = config.artifact_root / "evaluations"
+    evaluations.mkdir(parents=True)
+    report = evaluations / "evaluation_report.json"
+    report.write_text(json.dumps({"config_hash": config.digest, "qualified_population": True}))
+    stage = extract_updates(config)
+    payload = json.loads(stage.read_text())
+    extraction = json.loads((config.artifact_root / "weights/extraction.json").read_text())
+    assert payload["status"] == "AWAITING_UPSTREAM_ARTIFACTS"
+    assert extraction["qualified_population"] is False
+
+
+def test_extraction_rejects_malformed_qualification_report(tmp_path: Path) -> None:
+    config = load_config(ROOT / "configs/smoke.yaml").model_copy(
+        update={"artifact_root": tmp_path / "run"}
+    )
+    evaluations = config.artifact_root / "evaluations"
+    evaluations.mkdir(parents=True)
+    (evaluations / "evaluation_report.json").write_text("{")
+    extract_updates(config)
+    extraction = json.loads((config.artifact_root / "weights/extraction.json").read_text())
+    assert extraction["qualified_population"] is False
 
 
 def test_checkpoint_extraction_rejects_invalid_models() -> None:
