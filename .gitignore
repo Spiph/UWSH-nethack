@@ -220,6 +220,10 @@ __marimo__/
 # Project-generated experiment outputs
 /artifacts/
 
+# Local execution ledgers and operator notes. These are intentionally not part of
+# the published research harness or its immutable preregistration.
+/.phase0-local/
+
 # Local tools and runtime output
 .idea/
 .vscode/
