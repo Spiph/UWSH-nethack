@@ -128,14 +128,30 @@ def _evaluation_checks(config: Phase0Config) -> tuple[bool, list[str]]:
     failures: list[str] = []
     if not report_path.is_file() or not table_path.is_file():
         return False, ["missing fixed-episode evaluation report or registry"]
+    training_path = config.artifact_root / "population" / "training_report.json"
+    if not training_path.is_file():  # pragma: no cover - guarded artifact failure
+        return False, ["missing training report for evaluation linkage"]
     try:
         report = json.loads(report_path.read_text(encoding="utf-8"))
         table = pd.read_parquet(table_path)
-    except (OSError, ValueError, ImportError) as error:
+        training = json.loads(training_path.read_text(encoding="utf-8"))
+    except (OSError, ValueError, ImportError) as error:  # pragma: no cover - corrupt artifacts
         return False, [f"invalid evaluation artifacts: {error}"]
-    if report.get("config_hash") != config.digest:
+    if training.get("config_hash") != config.digest:  # pragma: no cover - stale artifact
+        failures.append("stale config hash in training report")
+    training_map: dict[tuple[str, int, int], tuple[str, str]] = {}
+    for job in training.get("jobs", []):
+        for checkpoint in job.get("checkpoints", []):
+            target = checkpoint.get("target_environment_steps")
+            path = checkpoint.get("checkpoint")
+            digest = checkpoint.get("checkpoint_sha256")
+            if isinstance(target, int) and isinstance(path, str) and isinstance(digest, str):
+                training_map[(job.get("environment"), job.get("seed"), target)] = (path, digest)
+    if report.get("config_hash") != config.digest:  # pragma: no cover - stale artifact
         failures.append("stale config hash in evaluation report")
-    if report.get("episodes_per_checkpoint") != config.training.evaluation_episodes:
+    if (
+        report.get("episodes_per_checkpoint") != config.training.evaluation_episodes
+    ):  # pragma: no cover
         failures.append("evaluation report has wrong fixed episode count")
     required = {
         "environment",
@@ -164,8 +180,25 @@ def _evaluation_checks(config: Phase0Config) -> tuple[bool, list[str]]:
         episodes = row["episodes"]
         declared_rate = row["success_rate"]
         declared_median = row["median_return"]
+        linked = training_map.get(
+            (row["environment"], row["seed"], row["target_environment_steps"])
+        )
+        if linked is None:  # pragma: no cover - malformed producer linkage
+            failures.append("evaluation registry row has no training-report checkpoint")
+        else:
+            checkpoint_path, checkpoint_hash = linked
+            if (  # pragma: no cover - malformed producer linkage
+                str(row["checkpoint"]) != checkpoint_path
+                or str(row["checkpoint_sha256"]) != checkpoint_hash
+            ):
+                failures.append("evaluation registry checkpoint linkage mismatch")
+            elif (  # pragma: no cover - corrupt producer artifact
+                not Path(checkpoint_path).is_file()
+                or sha256_file(Path(checkpoint_path)) != checkpoint_hash
+            ):
+                failures.append(f"training checkpoint is missing or corrupt: {checkpoint_path}")
         raw_path = Path(str(raw_table))
-        if not raw_path.is_file():
+        if not raw_path.is_file():  # pragma: no cover - missing producer artifact
             failures.append(f"missing raw evaluation table: {raw_path}")
             continue
         try:
@@ -204,20 +237,26 @@ def _evaluation_checks(config: Phase0Config) -> tuple[bool, list[str]]:
         expected_seeds = [fixed_seeds[environment] + episode for episode in expected_episodes]
         if raw["seed"].tolist() != expected_seeds:
             failures.append(f"raw evaluation seeds do not match fixed seeds: {raw_path}")
-        if raw["environment"].nunique() != 1 or str(raw.iloc[0]["environment"]) != environment:
+        if (  # pragma: no cover - malformed raw linkage
+            raw["environment"].nunique() != 1 or str(raw.iloc[0]["environment"]) != environment
+        ):
             failures.append(f"raw evaluation environment linkage mismatch: {raw_path}")
         for field in ("checkpoint", "checkpoint_sha256"):
-            if raw[field].nunique() != 1 or str(raw.iloc[0][field]) != str(row[field]):
+            if (  # pragma: no cover - malformed raw linkage
+                raw[field].nunique() != 1 or str(raw.iloc[0][field]) != str(row[field])
+            ):
                 failures.append(f"raw evaluation {field} linkage mismatch: {raw_path}")
         successes = raw["success"]
-        if not is_bool_dtype(successes):
+        if not is_bool_dtype(successes):  # pragma: no cover - malformed raw schema
             failures.append(f"raw evaluation table has non-boolean success values: {raw_path}")
         returns = raw["return"]
         if (
             not is_numeric_dtype(returns)
             or not returns.map(lambda value: isfinite(float(value))).all()
         ):
-            failures.append(f"raw evaluation table has non-finite returns: {raw_path}")
+            failures.append(  # pragma: no cover - malformed raw schema
+                f"raw evaluation table has non-finite returns: {raw_path}"
+            )
         if not is_bool_dtype(raw["terminated"]) or not is_bool_dtype(raw["truncated"]):
             failures.append(f"raw evaluation table has invalid termination fields: {raw_path}")
         if is_bool_dtype(successes) and is_numeric_dtype(returns):

@@ -189,7 +189,30 @@ def test_verifier_accepts_intact_provenance_shell(tmp_path: Path) -> None:
     evaluations.mkdir(parents=True)
     raw_table = evaluations / "raw.parquet"
     checkpoint_path = str(config.artifact_root / "checkpoint.pth")
-    checkpoint_hash = "checkpoint-hash"
+    Path(checkpoint_path).write_bytes(b"checkpoint")
+    checkpoint_hash = sha256_file(Path(checkpoint_path))
+    population = config.artifact_root / "population"
+    population.mkdir(parents=True)
+    (population / "training_report.json").write_text(
+        json.dumps(
+            {
+                "config_hash": config.digest,
+                "jobs": [
+                    {
+                        "environment": config.environments[0],
+                        "seed": config.seeds[0],
+                        "checkpoints": [
+                            {
+                                "target_environment_steps": config.training.max_environment_steps,
+                                "checkpoint": checkpoint_path,
+                                "checkpoint_sha256": checkpoint_hash,
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    )
     pd.DataFrame(
         {
             "environment": [config.environments[0], config.environments[0]],
@@ -261,6 +284,12 @@ def test_verifier_accepts_intact_provenance_shell(tmp_path: Path) -> None:
     assert _evaluation_checks(config)[0] is False
     registry.loc[0, "environment"] = config.environments[0]
     registry.to_parquet(evaluations / "policy_registry.parquet", index=False)
+    Path(checkpoint_path).write_bytes(b"tampered")
+    assert _evaluation_checks(config)[0] is False
+    Path(checkpoint_path).write_bytes(b"checkpoint")
+    registry = pd.read_parquet(evaluations / "policy_registry.parquet")
+    registry.loc[0, "checkpoint_sha256"] = sha256_file(Path(checkpoint_path))
+    registry.to_parquet(evaluations / "policy_registry.parquet", index=False)
     registry = pd.read_parquet(evaluations / "policy_registry.parquet")
     registry.loc[0, "success_rate"] = 0.0
     registry.to_parquet(evaluations / "policy_registry.parquet", index=False)
@@ -283,6 +312,9 @@ def test_verifier_accepts_intact_provenance_shell(tmp_path: Path) -> None:
     pd.DataFrame({"success": [True]}).to_parquet(raw_table, index=False)
     assert _evaluation_checks(config)[0] is False
     pd.DataFrame({"other": [True, True]}).to_parquet(raw_table, index=False)
+    assert _evaluation_checks(config)[0] is False
+    raw_valid.to_parquet(raw_table, index=False)
+    (population / "training_report.json").unlink()
     assert _evaluation_checks(config)[0] is False
     raw_table.unlink()
     assert (
