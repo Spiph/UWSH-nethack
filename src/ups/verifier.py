@@ -12,6 +12,8 @@ from math import isfinite
 from pathlib import Path
 from typing import Any
 
+import pandas as pd  # type: ignore[import-untyped]
+
 from ups.artifacts import sha256_file
 from ups.config import Phase0Config
 
@@ -92,6 +94,40 @@ def _population_checks(config: Phase0Config) -> tuple[bool, list[str]]:
     return not failures, failures
 
 
+def _evaluation_checks(config: Phase0Config) -> tuple[bool, list[str]]:
+    """Recompute population coverage and finite success values from raw registry data."""
+    report_path = config.artifact_root / "evaluations" / "evaluation_report.json"
+    table_path = config.artifact_root / "evaluations" / "policy_registry.parquet"
+    failures: list[str] = []
+    if not report_path.is_file() or not table_path.is_file():
+        return False, ["missing fixed-episode evaluation report or registry"]
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+        table = pd.read_parquet(table_path)
+    except (OSError, ValueError, ImportError) as error:
+        return False, [f"invalid evaluation artifacts: {error}"]
+    if report.get("config_hash") != config.digest:
+        failures.append("stale config hash in evaluation report")
+    required = {"environment", "seed", "target_environment_steps", "success_rate"}
+    if not required.issubset(table.columns):
+        failures.append("evaluation registry is missing required columns")
+        return False, failures
+    expected = {(environment, seed) for environment in config.environments for seed in config.seeds}
+    final = table[table["target_environment_steps"] == config.training.max_environment_steps]
+    observed = set(zip(final["environment"], final["seed"], strict=False))
+    if observed != expected or len(final) != len(expected):
+        failures.append("evaluation registry final task/seed pairs are incomplete or duplicated")
+    if table[list(required)].isnull().any().any():
+        failures.append("evaluation registry contains null required values")
+    if (
+        not table["success_rate"]
+        .map(lambda value: isinstance(value, (int, float)) and isfinite(value))
+        .all()
+    ):
+        failures.append("evaluation registry contains non-finite success rates")
+    return not failures, failures
+
+
 def verify_artifacts(config: Phase0Config, evidence: dict[str, Any]) -> dict[str, Any]:
     """Verify Gate Zero provenance and artifact integrity without trusting evidence flags."""
     checks: dict[str, bool] = {}
@@ -107,6 +143,8 @@ def verify_artifacts(config: Phase0Config, evidence: dict[str, Any]) -> dict[str
     failures.extend(manifest_failures)
     checks["population_integrity"], population_failures = _population_checks(config)
     failures.extend(population_failures)
+    checks["evaluation_integrity"], evaluation_failures = _evaluation_checks(config)
+    failures.extend(evaluation_failures)
 
     completeness = evidence.get("completeness", {})
     if not isinstance(completeness, dict):

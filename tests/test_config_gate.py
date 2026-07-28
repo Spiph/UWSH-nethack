@@ -3,6 +3,7 @@ from pathlib import Path
 from types import SimpleNamespace
 from typing import Any
 
+import pandas as pd  # type: ignore[import-untyped]
 import pytest
 import torch
 from pydantic import ValidationError
@@ -172,6 +173,30 @@ def test_verifier_accepts_intact_provenance_shell(tmp_path: Path) -> None:
             }
         )
     )
+    result = verify_artifacts(
+        config,
+        {
+            "config_hash": config.digest,
+            "evidence_class": "PREREGISTERED_FULL",
+            "completeness": {
+                "seed_leakage_detected": False,
+                "null_invariants_verified": True,
+            },
+        },
+    )
+    evaluations = config.artifact_root / "evaluations"
+    evaluations.mkdir(parents=True)
+    pd.DataFrame(
+        [
+            {
+                "environment": config.environments[0],
+                "seed": config.seeds[0],
+                "target_environment_steps": config.training.max_environment_steps,
+                "success_rate": 1.0,
+            }
+        ]
+    ).to_parquet(evaluations / "policy_registry.parquet", index=False)
+    (evaluations / "evaluation_report.json").write_text(json.dumps({"config_hash": config.digest}))
     result = verify_artifacts(
         config,
         {

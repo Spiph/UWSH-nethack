@@ -8,6 +8,7 @@ import typer
 
 from ups.artifacts import write_manifest
 from ups.config import load_config
+from ups.verifier import verify_artifacts
 from ups.workflow import analyze as run_analyze
 from ups.workflow import collect_states as run_collect_states
 from ups.workflow import evaluate as run_evaluate
@@ -43,6 +44,21 @@ def train(
 def evaluate(config: Path = typer.Option(config_option(), exists=True)) -> None:
     cfg = load_config(config)
     typer.echo(run_evaluate(cfg))
+
+
+@app.command("check")
+def check(
+    config: Path = typer.Option(config_option(), exists=True),
+    evidence: Path = typer.Option(..., exists=True, readable=True),
+) -> None:
+    """Independently verify Gate Zero artifacts and evidence claims."""
+    cfg = load_config(config)
+    import json
+
+    result = verify_artifacts(cfg, json.loads(evidence.read_text(encoding="utf-8")))
+    typer.echo(json.dumps(result, indent=2, sort_keys=True))
+    if not result["verified"]:
+        raise typer.Exit(code=1)
 
 
 @app.command("collect-states")
