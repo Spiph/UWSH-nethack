@@ -552,33 +552,110 @@ def _phase0_state_dict(payload: dict[str, Any]) -> dict[str, torch.Tensor]:
     return state
 
 
+def _retained_checkpoint_records(
+    config: Phase0Config,
+) -> dict[tuple[str, int], dict[str, Any]] | None:
+    """Return the recorded final checkpoints, never an inferred replacement.
+
+    A population report makes the final 2M-step checkpoint the only admissible
+    extraction source.  The ``None`` fallback is deliberately reserved for
+    isolated smoke fixtures created before a population report exists.
+    """
+    report_path = config.artifact_root / "population" / "training_report.json"
+    if not report_path.is_file():
+        return None
+    try:
+        report = json.loads(report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid training report for extraction: {error}") from error
+    if report.get("config_hash") != config.digest:
+        raise ValueError("stale configuration hash in training report for extraction")
+    retained: dict[tuple[str, int], dict[str, Any]] = {}
+    for job in report.get("jobs", []):
+        environment, seed = job.get("environment"), job.get("seed")
+        if not isinstance(environment, str) or not isinstance(seed, int):
+            raise ValueError("invalid task/seed record in training report for extraction")
+        final = [
+            record
+            for record in job.get("checkpoints", [])
+            if isinstance(record, dict)
+            and record.get("target_environment_steps") == config.training.max_environment_steps
+        ]
+        if len(final) != 1:
+            raise ValueError(
+                "training report must contain exactly one final checkpoint for "
+                f"{environment}:seed{seed}"
+            )
+        record = final[0]
+        checkpoint = Path(record.get("checkpoint", ""))
+        digest = record.get("checkpoint_sha256")
+        if (
+            not checkpoint.is_file()
+            or not isinstance(digest, str)
+            or sha256_path(checkpoint) != digest
+        ):
+            raise ValueError(f"retained checkpoint is missing or corrupt: {checkpoint}")
+        if (environment, seed) in retained:
+            raise ValueError(f"duplicate final checkpoint for {environment}:seed{seed}")
+        retained[(environment, seed)] = record
+    return retained
+
+
+def _architecture_metadata(state: dict[str, torch.Tensor]) -> dict[str, Any]:
+    """Describe the fixed Phase Zero policy interface without serializing tensors."""
+    module_keys = {
+        "encoder": [name for name in state if name.startswith("encoder.")],
+        "recurrent_core": [name for name in state if name.startswith("core.")],
+        "critic": [name for name in state if name.startswith("critic_linear.")],
+        "actor": [name for name in state if name.startswith("action_parameterization.")],
+    }
+    return {
+        "format": "sol-sample-factory-phase0-v2",
+        "action_count": 8,
+        "hidden_size": 256,
+        "modules": {module: sorted(keys) for module, keys in module_keys.items()},
+        "tensor_shapes": {name: list(tensor.shape) for name, tensor in sorted(state.items())},
+    }
+
+
 def extract_updates(config: Phase0Config) -> Path:
     """Convert SOL checkpoints to SafeTensors and propagate fixed-eval qualification."""
     source = config.artifact_root / "sample_factory"
     export_root = config.artifact_root / "weights"
     expected = {(environment, seed) for environment in config.environments for seed in config.seeds}
+    retained = _retained_checkpoint_records(config)
     seen: set[tuple[str, int]] = set()
     records: list[dict[str, Any]] = []
     if source.is_dir():
         for experiment in sorted(path for path in source.iterdir() if path.is_dir()):
             config_path = experiment / "config.json"
             checkpoint = _latest_checkpoint(experiment)
-            if not config_path.is_file() or checkpoint is None:
+            if not config_path.is_file() or (checkpoint is None and retained is None):
                 continue
             with config_path.open(encoding="utf-8") as stream:
                 sf_config = json.load(stream)
             environment, seed = sf_config.get("env"), sf_config.get("seed")
             if not isinstance(environment, str) or not isinstance(seed, int):
                 raise ValueError(f"invalid Sample Factory config at {config_path}")
+            if sf_config.get("algo") != config.training.algorithm:
+                raise ValueError(
+                    f"incompatible algorithm in Sample Factory config at {config_path}"
+                )
             if (environment, seed) not in expected:
+                continue
+            selected = retained.get((environment, seed)) if retained is not None else None
+            if retained is not None and selected is None:
+                continue
+            if selected is not None:
+                checkpoint = Path(selected["checkpoint"])
+            if checkpoint is None:  # pragma: no cover - guarded by retained selection above
                 continue
             payload = torch.load(checkpoint, map_location="cpu")
             state = _phase0_state_dict(payload)
             destination = export_root / f"{environment.removesuffix('-v0')}-seed{seed}.safetensors"
             destination.parent.mkdir(parents=True, exist_ok=True)
-            save_torch_file(
-                state, str(destination), metadata={"format": "sol-sample-factory-phase0-v1"}
-            )
+            architecture = _architecture_metadata(state)
+            save_torch_file(state, str(destination), metadata={"format": architecture["format"]})
             metadata_path = destination.with_suffix(".json")
             atomic_json(
                 metadata_path,
@@ -588,9 +665,14 @@ def extract_updates(config: Phase0Config) -> Path:
                     "checkpoint": str(checkpoint),
                     "checkpoint_sha256": sha256_path(checkpoint),
                     "weights": str(destination),
+                    "weights_sha256": sha256_path(destination),
+                    "sample_factory_config": str(config_path),
+                    "sample_factory_config_sha256": sha256_path(config_path),
+                    "architecture": architecture,
                     "state_keys": sorted(state),
                     "train_step": payload.get("train_step"),
                     "environment_steps": payload.get("env_steps"),
+                    "selected_from_training_report": selected is not None,
                 },
             )
             records.append(json.loads(metadata_path.read_text(encoding="utf-8")))

@@ -22,6 +22,7 @@ from ups.sol_evaluate import checkpoint_config_path
 from ups.verifier import _evaluation_checks, _manifest_checks, _population_checks, verify_artifacts
 from ups.workflow import (
     _phase0_state_dict,
+    _retained_checkpoint_records,
     checkpoint_environment_steps,
     evaluate,
     extract_updates,
@@ -488,6 +489,53 @@ def test_verifier_checks_training_checkpoint_hashes(tmp_path: Path) -> None:
     assert _population_checks(config)[0] is False
 
 
+def test_retained_checkpoint_selection_rejects_untrusted_records(tmp_path: Path) -> None:
+    config = load_config(ROOT / "configs/smoke.yaml").model_copy(
+        update={"artifact_root": tmp_path / "run"}
+    )
+    assert _retained_checkpoint_records(config) is None
+    population = config.artifact_root / "population"
+    population.mkdir(parents=True)
+    report_path = population / "training_report.json"
+    report_path.write_text("{")
+    with pytest.raises(ValueError, match="invalid training report"):
+        _retained_checkpoint_records(config)
+    report_path.write_text(json.dumps({"config_hash": "stale", "jobs": []}))
+    with pytest.raises(ValueError, match="stale configuration"):
+        _retained_checkpoint_records(config)
+    base = {"config_hash": config.digest, "jobs": [{"environment": 1, "seed": 0}]}
+    report_path.write_text(json.dumps(base))
+    with pytest.raises(ValueError, match="invalid task/seed"):
+        _retained_checkpoint_records(config)
+    job: dict[str, Any] = {
+        "environment": config.environments[0],
+        "seed": config.seeds[0],
+        "checkpoints": [],
+    }
+    report_path.write_text(json.dumps({"config_hash": config.digest, "jobs": [job]}))
+    with pytest.raises(ValueError, match="exactly one final"):
+        _retained_checkpoint_records(config)
+    missing = config.artifact_root / "missing.pth"
+    job["checkpoints"] = [
+        {
+            "target_environment_steps": config.training.max_environment_steps,
+            "checkpoint": str(missing),
+            "checkpoint_sha256": "missing",
+        }
+    ]
+    report_path.write_text(json.dumps({"config_hash": config.digest, "jobs": [job]}))
+    with pytest.raises(ValueError, match="missing or corrupt"):
+        _retained_checkpoint_records(config)
+    checkpoint = config.artifact_root / "checkpoint.pth"
+    checkpoint.write_bytes(b"valid")
+    job["checkpoints"][0].update(
+        {"checkpoint": str(checkpoint), "checkpoint_sha256": sha256_file(checkpoint)}
+    )
+    report_path.write_text(json.dumps({"config_hash": config.digest, "jobs": [job, job]}))
+    with pytest.raises(ValueError, match="duplicate final"):
+        _retained_checkpoint_records(config)
+
+
 def test_verifier_rejects_bad_evaluation_registry(tmp_path: Path) -> None:
     config = load_config(ROOT / "configs/smoke.yaml").model_copy(
         update={"artifact_root": tmp_path / "run"}
@@ -711,7 +759,7 @@ def test_extract_sol_checkpoint_to_safetensors(tmp_path: Path) -> None:
     checkpoint = experiment / "checkpoint_p0" / "checkpoint_000000001_32.pth"
     checkpoint.parent.mkdir(parents=True)
     (experiment / "config.json").write_text(
-        json.dumps({"env": config.environments[0], "seed": config.seeds[0]})
+        json.dumps({"algo": "APPO", "env": config.environments[0], "seed": config.seeds[0]})
     )
     state = {
         "encoder.glyph_embedding.weight": torch.zeros(6000, 32),
@@ -724,6 +772,31 @@ def test_extract_sol_checkpoint_to_safetensors(tmp_path: Path) -> None:
         "action_parameterization.distribution_linear.weight": torch.zeros(8, 256),
     }
     torch.save({"model": state, "train_step": 1, "env_steps": 32}, checkpoint)
+    unrecorded_newer = checkpoint.with_name("checkpoint_000000002_64.pth")
+    unrecorded_newer.write_bytes(b"not a compatible checkpoint")
+    population = config.artifact_root / "population"
+    population.mkdir(parents=True)
+    (population / "training_report.json").write_text(
+        json.dumps(
+            {
+                "config_hash": config.digest,
+                "jobs": [
+                    {
+                        "environment": config.environments[0],
+                        "seed": config.seeds[0],
+                        "checkpoints": [
+                            {
+                                "target_environment_steps": config.training.max_environment_steps,
+                                "actual_environment_steps": config.training.max_environment_steps,
+                                "checkpoint": str(checkpoint),
+                                "checkpoint_sha256": sha256_file(checkpoint),
+                            }
+                        ],
+                    }
+                ],
+            }
+        )
+    )
     evaluations = config.artifact_root / "evaluations"
     evaluations.mkdir(parents=True)
     (evaluations / "evaluation_report.json").write_text(
@@ -734,6 +807,11 @@ def test_extract_sol_checkpoint_to_safetensors(tmp_path: Path) -> None:
     assert payload["status"] == "EXTRACTED_QUALIFIED"
     exported = next((config.artifact_root / "weights").glob("*.safetensors"))
     assert load_file(exported)["encoder.projection.weight"].shape == (256, 5211)
+    metadata = json.loads(exported.with_suffix(".json").read_text())
+    assert metadata["weights_sha256"] == sha256_file(exported)
+    assert metadata["architecture"]["action_count"] == 8
+    assert metadata["checkpoint"] == str(checkpoint)
+    assert metadata["selected_from_training_report"] is True
 
 
 def test_extraction_propagates_qualified_evaluation(tmp_path: Path) -> None:
