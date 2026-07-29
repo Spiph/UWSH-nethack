@@ -33,7 +33,7 @@ ENTRYPOINT ["ups"]
 CMD ["--help"]
 
 FROM nvidia/cuda:12.1.1-cudnn8-runtime-ubuntu22.04 AS gpu
-RUN apt-get update && apt-get install -y --no-install-recommends python3.10 libglib2.0-0 libncurses6 \
+RUN apt-get update && apt-get install -y --no-install-recommends python3.10 libgl1 libglib2.0-0 libncurses6 \
     && ln -s /usr/bin/python3.10 /usr/local/bin/python3 \
     && rm -rf /var/lib/apt/lists/*
 COPY --from=build /workspace /workspace
