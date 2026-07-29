@@ -52,8 +52,13 @@ def main(argv: list[str] | None = None) -> int:
         "--with_wandb=False",
         "--num_workers=1",
         "--num_envs_per_worker=2",
-        "--batch_size=32",
+        # Two environments x 32 rollout steps yield 64 samples in synchronous
+        # serial mode, so the learner batch must be an exact divisor/multiple.
+        "--batch_size=64",
         "--rollout=32",
+        # Gate Zero analyzes every 100k checkpoint, so the runtime must not
+        # garbage-collect earlier records before the verifier can inspect them.
+        "--keep_checkpoints=20",
         "--device=cpu" if args.smoke else "--device=gpu",
     ]
     if args.resume:
