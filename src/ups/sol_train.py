@@ -45,6 +45,10 @@ def main(argv: list[str] | None = None) -> int:
         "--rnn_size=256",
         "--rnn_num_layers=1",
         "--actor_critic_share_weights=True",
+        # Serial mode keeps CUDA tensors inside one process. This avoids CUDA IPC
+        # handle failures in containerized single-GPU execution.
+        "--serial_mode=True",
+        "--async_rl=False",
         "--with_wandb=False",
         "--num_workers=1",
         "--num_envs_per_worker=2",
