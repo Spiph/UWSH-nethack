@@ -18,6 +18,7 @@ from ups.gate import (
     _null_ensemble_counts,
     evaluate_gate,
 )
+from ups.sol_evaluate import checkpoint_config_path
 from ups.verifier import _evaluation_checks, _manifest_checks, _population_checks, verify_artifacts
 from ups.workflow import (
     _phase0_state_dict,
@@ -31,6 +32,11 @@ from ups.workflow import (
 )
 
 ROOT = Path(__file__).parents[1]
+
+
+def test_sample_factory_checkpoint_config_path() -> None:
+    checkpoint = Path("sample_factory/job/checkpoint_p0/checkpoint_0001_32.pth")
+    assert checkpoint_config_path(checkpoint) == Path("sample_factory/job/config.json")
 
 
 def test_config_hash_is_stable_and_schema_is_strict(tmp_path: Path) -> None:

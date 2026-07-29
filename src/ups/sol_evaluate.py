@@ -31,14 +31,27 @@ def parser() -> argparse.ArgumentParser:
     command.add_argument("--artifact-root", type=Path, required=True)
     command.add_argument("--environment", required=True)
     command.add_argument("--experiment", required=True)
+    command.add_argument(
+        "--max-episode-steps",
+        type=int,
+        default=None,
+        help="Optional diagnostic cap; omit for preregistered scientific evaluation.",
+    )
     return command
+
+
+def checkpoint_config_path(checkpoint: Path) -> Path:
+    """Return the Sample Factory config beside a checkpoint directory."""
+    return checkpoint.parent.parent / "config.json"
 
 
 def _load_policy(checkpoint: Path, environment: str) -> tuple[Any, Any, Any]:
     from sample_factory.model.actor_critic import create_actor_critic
     from sf_examples.nethack.train_nethack import parse_nethack_args
 
-    config_path = checkpoint.parent.parent.parent / "config.json"
+    # Sample Factory stores config.json beside checkpoint_p0, i.e. two parents
+    # above the checkpoint file (checkpoint_p0 -> experiment).
+    config_path = checkpoint_config_path(checkpoint)
     config = json.loads(config_path.read_text(encoding="utf-8"))
     sf_config = parse_nethack_args(shlex.split(config["command_line"]))
     env = make_phase0_env(environment, sf_config, {})
@@ -71,6 +84,8 @@ def evaluate(args: argparse.Namespace) -> Path:
             observation, reward, terminated, truncated, info = env.step(action)
             total_return += float(reward)
             steps += 1
+            if args.max_episode_steps is not None and steps >= args.max_episode_steps:
+                truncated = True
         rows.append(
             {
                 "environment": args.environment,
@@ -101,6 +116,7 @@ def evaluate(args: argparse.Namespace) -> Path:
             "checkpoint_sha256": sha256_file(args.checkpoint),
             "episodes": args.episodes,
             "eval_seed": args.eval_seed,
+            "max_episode_steps": args.max_episode_steps,
             "success_rate": float(pd.DataFrame(rows)["success"].mean()),
             "median_return": float(pd.DataFrame(rows)["return"].median()),
             "table": str(table_path),
