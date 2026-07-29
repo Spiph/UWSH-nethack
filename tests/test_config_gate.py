@@ -202,8 +202,10 @@ def test_verifier_accepts_intact_provenance_shell(tmp_path: Path) -> None:
     evaluations = config.artifact_root / "evaluations"
     evaluations.mkdir(parents=True)
     raw_table = evaluations / "raw.parquet"
-    checkpoint_path = str(config.artifact_root / "checkpoint.pth")
+    checkpoint_path = str(config.artifact_root / "checkpoint_128.pth")
+    checkpoint_earlier = config.artifact_root / "checkpoint_64.pth"
     Path(checkpoint_path).write_bytes(b"checkpoint")
+    checkpoint_earlier.write_bytes(b"checkpoint-earlier")
     checkpoint_hash = sha256_file(Path(checkpoint_path))
     population = config.artifact_root / "population"
     population.mkdir(parents=True)
@@ -217,10 +219,17 @@ def test_verifier_accepts_intact_provenance_shell(tmp_path: Path) -> None:
                         "seed": config.seeds[0],
                         "checkpoints": [
                             {
+                                "target_environment_steps": 64,
+                                "actual_environment_steps": 64,
+                                "checkpoint": str(checkpoint_earlier),
+                                "checkpoint_sha256": sha256_file(checkpoint_earlier),
+                            },
+                            {
                                 "target_environment_steps": config.training.max_environment_steps,
+                                "actual_environment_steps": config.training.max_environment_steps,
                                 "checkpoint": checkpoint_path,
                                 "checkpoint_sha256": checkpoint_hash,
-                            }
+                            },
                         ],
                     }
                 ],
@@ -411,9 +420,11 @@ def test_verifier_checks_training_checkpoint_hashes(tmp_path: Path) -> None:
     config = load_config(ROOT / "configs/smoke.yaml").model_copy(
         update={"artifact_root": tmp_path / "run"}
     )
-    checkpoint = config.artifact_root / "sample_factory" / "job" / "checkpoint.pth"
+    checkpoint = config.artifact_root / "sample_factory" / "job" / "checkpoint_64.pth"
+    checkpoint_later = checkpoint.with_name("checkpoint_128.pth")
     checkpoint.parent.mkdir(parents=True)
     checkpoint.write_bytes(b"checkpoint")
+    checkpoint_later.write_bytes(b"checkpoint-later")
     training = config.artifact_root / "population"
     training.mkdir(parents=True)
     (training / "training_report.json").write_text(
@@ -426,9 +437,17 @@ def test_verifier_checks_training_checkpoint_hashes(tmp_path: Path) -> None:
                         "seed": config.seeds[0],
                         "checkpoints": [
                             {
+                                "target_environment_steps": 64,
+                                "actual_environment_steps": 64,
                                 "checkpoint": str(checkpoint),
                                 "checkpoint_sha256": sha256_file(checkpoint),
-                            }
+                            },
+                            {
+                                "target_environment_steps": 128,
+                                "actual_environment_steps": 128,
+                                "checkpoint": str(checkpoint_later),
+                                "checkpoint_sha256": sha256_file(checkpoint_later),
+                            },
                         ],
                     }
                 ],
@@ -446,6 +465,24 @@ def test_verifier_checks_training_checkpoint_hashes(tmp_path: Path) -> None:
             }
         )
     )
+    assert _population_checks(config)[0] is True
+    report_path = training / "training_report.json"
+    report = json.loads(report_path.read_text())
+    report["jobs"][0]["checkpoints"].pop()
+    report_path.write_text(json.dumps(report))
+    assert _population_checks(config)[0] is False
+    report["jobs"][0]["checkpoints"].append(
+        {
+            "target_environment_steps": 128,
+            "actual_environment_steps": 256,
+            "checkpoint": str(checkpoint_later),
+            "checkpoint_sha256": sha256_file(checkpoint_later),
+        }
+    )
+    report_path.write_text(json.dumps(report))
+    assert _population_checks(config)[0] is False
+    report["jobs"][0]["checkpoints"][1]["actual_environment_steps"] = 128
+    report_path.write_text(json.dumps(report))
     assert _population_checks(config)[0] is True
     checkpoint.write_bytes(b"tampered")
     assert _population_checks(config)[0] is False

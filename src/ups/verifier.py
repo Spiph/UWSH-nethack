@@ -88,19 +88,47 @@ def _population_checks(config: Phase0Config) -> tuple[bool, list[str]]:
             expected_pairs = {
                 (environment, seed) for environment in config.environments for seed in config.seeds
             }
+            expected_targets = set(
+                range(
+                    config.training.evaluation_interval,
+                    config.training.max_environment_steps + config.training.evaluation_interval,
+                    config.training.evaluation_interval,
+                )
+            )
             observed_pairs = {(job.get("environment"), job.get("seed")) for job in jobs}
             if observed_pairs != expected_pairs or len(jobs) != len(expected_pairs):
                 training_failures.append(
                     "training report has incomplete or duplicate task/seed jobs"
                 )
             for job in jobs:
-                for checkpoint in job.get("checkpoints", []):
+                checkpoints = job.get("checkpoints", [])
+                targets = [
+                    checkpoint.get("target_environment_steps")
+                    for checkpoint in checkpoints
+                    if isinstance(checkpoint, dict)
+                ]
+                if set(targets) != expected_targets or len(targets) != len(expected_targets):
+                    training_failures.append(
+                        "training report does not contain the exact configured checkpoint schedule"
+                    )
+                for checkpoint in checkpoints:
+                    if not isinstance(checkpoint, dict):
+                        training_failures.append("invalid checkpoint record")
+                        continue
                     path = Path(checkpoint.get("checkpoint", ""))
                     expected_hash = checkpoint.get("checkpoint_sha256")
                     if not path.is_file() or not isinstance(expected_hash, str):
                         training_failures.append(f"missing checkpoint record: {path}")
                     elif sha256_file(path) != expected_hash:
                         training_failures.append(f"checkpoint hash mismatch: {path}")
+                    target = checkpoint.get("target_environment_steps")
+                    actual = checkpoint.get("actual_environment_steps")
+                    if (
+                        not isinstance(target, int)
+                        or not isinstance(actual, int)
+                        or not target <= actual < target + config.training.evaluation_interval
+                    ):
+                        training_failures.append("checkpoint environment-step record is invalid")
         except (OSError, json.JSONDecodeError, AttributeError):
             training_failures.append("invalid training report")
     report_path = config.artifact_root / "weights" / "extraction.json"
