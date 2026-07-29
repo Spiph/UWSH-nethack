@@ -163,6 +163,7 @@ def _evaluation_checks(config: Phase0Config) -> tuple[bool, list[str]]:
         "median_return",
         "episodes",
         "evaluation_table",
+        "max_episode_steps",
     }
     if not required.issubset(table.columns):
         failures.append("evaluation registry is missing required columns")
@@ -173,8 +174,11 @@ def _evaluation_checks(config: Phase0Config) -> tuple[bool, list[str]]:
     observed = set(zip(final["environment"], final["seed"], strict=False))
     if observed != expected or len(final) != len(expected):
         failures.append("evaluation registry final task/seed pairs are incomplete or duplicated")
-    if table[list(required)].isnull().any().any():
+    non_nullable = required - {"max_episode_steps"}
+    if table[list(non_nullable)].isnull().any().any():
         failures.append("evaluation registry contains null required values")
+    if not table["max_episode_steps"].isnull().all():
+        failures.append("scientific evaluation registry contains bounded diagnostic episodes")
     for _, row in table.iterrows():
         raw_table = row["evaluation_table"]
         episodes = row["episodes"]

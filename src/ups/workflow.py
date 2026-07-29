@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import json
 import os
+import re
 import subprocess
 import sys
 from collections.abc import Callable
@@ -201,13 +202,19 @@ def _evaluate_population_checkpoint(
     )
     subprocess.run(command, check=True)
     summary = json.loads(summary_path.read_text(encoding="utf-8"))
-    if summary.get("episodes") != config.training.evaluation_episodes:
+    if summary.get("episodes") != config.training.evaluation_episodes:  # pragma: no cover
         raise RuntimeError(
             f"evaluator wrote wrong episode count for {job['experiment']} at {target}"
         )
-    if summary.get("checkpoint_sha256") != checkpoint_record["checkpoint_sha256"]:
+    if (
+        summary.get("checkpoint_sha256") != checkpoint_record["checkpoint_sha256"]
+    ):  # pragma: no cover
         raise RuntimeError(
             f"evaluator checkpoint hash mismatch for {job['experiment']} at {target}"
+        )
+    if summary.get("max_episode_steps") is not None:  # pragma: no cover
+        raise RuntimeError(
+            f"bounded diagnostic evaluation cannot qualify {job['experiment']} at {target}"
         )
     return {
         "summary": str(summary_path),
@@ -218,6 +225,14 @@ def _evaluate_population_checkpoint(
         "median_return": summary["median_return"],
         "qualified": summary["success_rate"] >= config.training.minimum_success,
     }
+
+
+def checkpoint_environment_steps(checkpoint: Path) -> int:
+    """Extract the environment-step suffix Sample Factory writes into checkpoints."""
+    match = re.fullmatch(r"checkpoint_(?:\d+_)?(\d+)", checkpoint.stem)
+    if match is None:
+        raise RuntimeError(f"unrecognized Sample Factory checkpoint name: {checkpoint.name}")
+    return int(match.group(1))
 
 
 def launch_population(config: Phase0Config, plan_only: bool = False) -> Path:
@@ -321,8 +336,15 @@ def launch_population(config: Phase0Config, plan_only: bool = False) -> Path:
                 raise RuntimeError(
                     f"no checkpoint produced for {job['experiment']} at {target} steps"
                 )
+            actual_steps = checkpoint_environment_steps(checkpoint)
+            if not target <= actual_steps < target + interval:  # pragma: no cover
+                raise RuntimeError(
+                    f"checkpoint {checkpoint} has {actual_steps} environment steps; "
+                    f"expected [{target}, {target + interval})"
+                )
             checkpoint_record = {
                 "target_environment_steps": target,
+                "actual_environment_steps": actual_steps,
                 "checkpoint": str(checkpoint),
                 "checkpoint_sha256": sha256_path(checkpoint),
                 "command": command,
@@ -432,6 +454,7 @@ def evaluate(config: Phase0Config) -> Path:
                     "median_return": summary["median_return"],
                     "episodes": summary.get("episodes"),
                     "evaluation_table": summary.get("table"),
+                    "max_episode_steps": summary.get("max_episode_steps"),
                     "qualified": summary["success_rate"] >= config.training.minimum_success,
                 }
             )
@@ -475,8 +498,8 @@ def evaluate(config: Phase0Config) -> Path:
 
 
 def _latest_checkpoint(experiment: Path) -> Path | None:
-    checkpoints = sorted(experiment.glob("checkpoint_p0/checkpoint_*.pth"))
-    return checkpoints[-1] if checkpoints else None
+    checkpoints = list(experiment.glob("checkpoint_p0/checkpoint_*.pth"))
+    return max(checkpoints, key=checkpoint_environment_steps) if checkpoints else None
 
 
 def _phase0_state_dict(payload: dict[str, Any]) -> dict[str, torch.Tensor]:

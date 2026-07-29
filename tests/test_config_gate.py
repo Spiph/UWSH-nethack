@@ -22,6 +22,7 @@ from ups.sol_evaluate import checkpoint_config_path
 from ups.verifier import _evaluation_checks, _manifest_checks, _population_checks, verify_artifacts
 from ups.workflow import (
     _phase0_state_dict,
+    checkpoint_environment_steps,
     evaluate,
     extract_updates,
     launch_population,
@@ -37,6 +38,13 @@ ROOT = Path(__file__).parents[1]
 def test_sample_factory_checkpoint_config_path() -> None:
     checkpoint = Path("sample_factory/job/checkpoint_p0/checkpoint_0001_32.pth")
     assert checkpoint_config_path(checkpoint) == Path("sample_factory/job/config.json")
+
+
+def test_sample_factory_checkpoint_step_parser() -> None:
+    assert checkpoint_environment_steps(Path("checkpoint_000000012_384.pth")) == 384
+    assert checkpoint_environment_steps(Path("checkpoint_100000.pth")) == 100000
+    with pytest.raises(RuntimeError, match="unrecognized"):
+        checkpoint_environment_steps(Path("policy.pth"))
 
 
 def test_config_hash_is_stable_and_schema_is_strict(tmp_path: Path) -> None:
@@ -244,6 +252,7 @@ def test_verifier_accepts_intact_provenance_shell(tmp_path: Path) -> None:
                 "median_return": 1.0,
                 "episodes": config.training.evaluation_episodes,
                 "evaluation_table": str(raw_table),
+                "max_episode_steps": None,
             }
         ]
     ).to_parquet(evaluations / "policy_registry.parquet", index=False)
