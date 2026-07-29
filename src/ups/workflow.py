@@ -162,12 +162,70 @@ def population_jobs(config: Phase0Config) -> list[dict[str, Any]]:
     return jobs
 
 
+def _fixed_evaluation_command(
+    config: Phase0Config, job: dict[str, Any], checkpoint: Path, target: int
+) -> tuple[list[str], Path]:
+    """Build the immutable fixed-episode evaluation command for one checkpoint."""
+    fixed_seeds = dict(zip(config.environments, config.evaluation_buffer.fixed_seeds, strict=True))
+    experiment = f"{job['experiment']}-step{target}"
+    summary_path = config.artifact_root / "evaluations" / f"{experiment}.json"
+    return (
+        [
+            sys.executable,
+            "-m",
+            "ups.sol_evaluate",
+            "--checkpoint",
+            str(checkpoint),
+            "--episodes",
+            str(config.training.evaluation_episodes),
+            "--eval-seed",
+            str(fixed_seeds[job["environment"]]),
+            "--artifact-root",
+            str(config.artifact_root),
+            "--environment",
+            job["environment"],
+            "--experiment",
+            experiment,
+        ],
+        summary_path,
+    )
+
+
+def _evaluate_population_checkpoint(
+    config: Phase0Config, job: dict[str, Any], checkpoint_record: dict[str, Any]
+) -> dict[str, Any]:
+    """Run and validate the preregistered fixed evaluation for one training record."""
+    target = checkpoint_record["target_environment_steps"]
+    command, summary_path = _fixed_evaluation_command(
+        config, job, Path(checkpoint_record["checkpoint"]), target
+    )
+    subprocess.run(command, check=True)
+    summary = json.loads(summary_path.read_text(encoding="utf-8"))
+    if summary.get("episodes") != config.training.evaluation_episodes:
+        raise RuntimeError(
+            f"evaluator wrote wrong episode count for {job['experiment']} at {target}"
+        )
+    if summary.get("checkpoint_sha256") != checkpoint_record["checkpoint_sha256"]:
+        raise RuntimeError(
+            f"evaluator checkpoint hash mismatch for {job['experiment']} at {target}"
+        )
+    return {
+        "summary": str(summary_path),
+        "table": summary.get("table"),
+        "episodes": summary["episodes"],
+        "eval_seed": summary.get("eval_seed"),
+        "success_rate": summary["success_rate"],
+        "median_return": summary["median_return"],
+        "qualified": summary["success_rate"] >= config.training.minimum_success,
+    }
+
+
 def launch_population(config: Phase0Config, plan_only: bool = False) -> Path:
     """Launch exactly the preregistered jobs in resumable 100k-step chunks.
 
-    The launcher intentionally stops at ``TRAINED_AWAITING_EVALUATION``. No
-    checkpoint becomes a retained policy until the fixed-episode evaluator records
-    the preregistered success threshold.
+    Every produced checkpoint is immediately evaluated on the fixed episode set.
+    Progress is atomically persisted after training and again after evaluation, so
+    a resumed run cannot silently bypass evidence for a completed 100k segment.
     """
     jobs = population_jobs(config)
     population_root = config.artifact_root / "population"
@@ -209,13 +267,36 @@ def launch_population(config: Phase0Config, plan_only: bool = False) -> Path:
     for job in jobs:
         experiment_root = config.artifact_root / "sample_factory" / job["experiment"]
         checkpoints = list(prior.get((job["environment"], job["seed"]), {}).get("checkpoints", []))
-        completed_targets = {
-            record.get("target_environment_steps")
-            for record in checkpoints
-            if isinstance(record, dict) and Path(record.get("checkpoint", "")).is_file()
-        }
         for target in range(interval, config.training.max_environment_steps + interval, interval):
-            if target in completed_targets:
+            existing = next(
+                (
+                    record
+                    for record in checkpoints
+                    if isinstance(record, dict)
+                    and record.get("target_environment_steps") == target
+                    and Path(record.get("checkpoint", "")).is_file()
+                ),
+                None,
+            )
+            if existing is not None:
+                if not isinstance(existing.get("evaluation"), dict):
+                    existing["evaluation"] = _evaluate_population_checkpoint(config, job, existing)
+                    job_records = [
+                        {**prior_job, "checkpoints": checkpoints}
+                        if (prior_job["environment"], prior_job["seed"])
+                        == (job["environment"], job["seed"])
+                        else prior_job
+                        for prior_job in job_records
+                    ]
+                    atomic_json(
+                        report,
+                        {
+                            "config_hash": config.digest,
+                            "jobs": job_records,
+                            "status": "EVALUATION_IN_PROGRESS",
+                            "qualified_population": False,
+                        },
+                    )
                 continue
             command = [
                 sys.executable,
@@ -240,15 +321,14 @@ def launch_population(config: Phase0Config, plan_only: bool = False) -> Path:
                 raise RuntimeError(
                     f"no checkpoint produced for {job['experiment']} at {target} steps"
                 )
-            checkpoints.append(
-                {
-                    "target_environment_steps": target,
-                    "checkpoint": str(checkpoint),
-                    "checkpoint_sha256": sha256_path(checkpoint),
-                    "command": command,
-                    "evaluation": "AWAITING_FIXED_200_EPISODE_EVALUATION",
-                }
-            )
+            checkpoint_record = {
+                "target_environment_steps": target,
+                "checkpoint": str(checkpoint),
+                "checkpoint_sha256": sha256_path(checkpoint),
+                "command": command,
+                "evaluation": "AWAITING_FIXED_EPISODE_EVALUATION",
+            }
+            checkpoints.append(checkpoint_record)
             job_records = [
                 {**existing, "checkpoints": checkpoints}
                 for existing in job_records
@@ -264,6 +344,18 @@ def launch_population(config: Phase0Config, plan_only: bool = False) -> Path:
                     "qualified_population": False,
                 },
             )
+            checkpoint_record["evaluation"] = _evaluate_population_checkpoint(
+                config, job, checkpoint_record
+            )
+            atomic_json(
+                report,
+                {
+                    "config_hash": config.digest,
+                    "jobs": job_records,
+                    "status": "EVALUATION_IN_PROGRESS",
+                    "qualified_population": False,
+                },
+            )
         if not any(
             (record["environment"], record["seed"]) == (job["environment"], job["seed"])
             for record in job_records
@@ -274,7 +366,7 @@ def launch_population(config: Phase0Config, plan_only: bool = False) -> Path:
         {
             "config_hash": config.digest,
             "jobs": job_records,
-            "status": "TRAINED_AWAITING_EVALUATION",
+            "status": "TRAINED_AND_EVALUATED",
             "qualified_population": False,
         },
     )
@@ -282,7 +374,7 @@ def launch_population(config: Phase0Config, plan_only: bool = False) -> Path:
         config,
         "train",
         {
-            "status": "TRAINED_AWAITING_EVALUATION",
+            "status": "TRAINED_AND_EVALUATED",
             "checkpoint": str(population_root),
             "jobs": job_records,
             "training_report": str(report),

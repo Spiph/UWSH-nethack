@@ -517,6 +517,24 @@ def test_population_launcher_records_resumable_chunks(
 
     def fake_run(command: list[str], check: bool) -> None:
         assert check is True
+        if "ups.sol_evaluate" in command:
+            checkpoint = Path(command[command.index("--checkpoint") + 1])
+            experiment = command[command.index("--experiment") + 1]
+            evaluations = config.artifact_root / "evaluations"
+            evaluations.mkdir(parents=True, exist_ok=True)
+            (evaluations / f"{experiment}.json").write_text(
+                json.dumps(
+                    {
+                        "episodes": config.training.evaluation_episodes,
+                        "checkpoint_sha256": sha256_file(checkpoint),
+                        "eval_seed": 1101,
+                        "success_rate": 0.0,
+                        "median_return": 0.0,
+                        "table": str(evaluations / f"{experiment}.parquet"),
+                    }
+                )
+            )
+            return
         experiment = command[command.index("--experiment") + 1]
         target = command[command.index("--max-steps") + 1]
         checkpoint = (
@@ -532,10 +550,19 @@ def test_population_launcher_records_resumable_chunks(
     monkeypatch.setattr("ups.workflow.subprocess", SimpleNamespace(run=fake_run))
     stage = launch_population(config)
     payload = json.loads(stage.read_text())
-    assert payload["status"] == "TRAINED_AWAITING_EVALUATION"
+    assert payload["status"] == "TRAINED_AND_EVALUATED"
     assert len(payload["jobs"][0]["checkpoints"]) == 2
+    assert all(
+        isinstance(record["evaluation"], dict) for record in payload["jobs"][0]["checkpoints"]
+    )
+    report_path = config.artifact_root / "population" / "training_report.json"
+    report = json.loads(report_path.read_text())
+    report["jobs"][0]["checkpoints"][0]["evaluation"] = "AWAITING_FIXED_EPISODE_EVALUATION"
+    report_path.write_text(json.dumps(report))
     resumed = launch_population(config)
-    assert json.loads(resumed.read_text())["status"] == "TRAINED_AWAITING_EVALUATION"
+    resumed_payload = json.loads(resumed.read_text())
+    assert resumed_payload["status"] == "TRAINED_AND_EVALUATED"
+    assert isinstance(resumed_payload["jobs"][0]["checkpoints"][0]["evaluation"], dict)
 
 
 def test_population_launcher_recovers_malformed_progress_report(
@@ -550,6 +577,24 @@ def test_population_launcher_recovers_malformed_progress_report(
     (population / "training_report.json").write_text("{")
 
     def fake_run(command: list[str], check: bool) -> None:
+        if "ups.sol_evaluate" in command:
+            checkpoint = Path(command[command.index("--checkpoint") + 1])
+            experiment = command[command.index("--experiment") + 1]
+            evaluations = config.artifact_root / "evaluations"
+            evaluations.mkdir(parents=True, exist_ok=True)
+            (evaluations / f"{experiment}.json").write_text(
+                json.dumps(
+                    {
+                        "episodes": config.training.evaluation_episodes,
+                        "checkpoint_sha256": sha256_file(checkpoint),
+                        "eval_seed": 1101,
+                        "success_rate": 0.0,
+                        "median_return": 0.0,
+                        "table": str(evaluations / f"{experiment}.parquet"),
+                    }
+                )
+            )
+            return
         experiment = command[command.index("--experiment") + 1]
         target = command[command.index("--max-steps") + 1]
         checkpoint = (
@@ -563,9 +608,7 @@ def test_population_launcher_recovers_malformed_progress_report(
         checkpoint.write_text(target)
 
     monkeypatch.setattr("ups.workflow.subprocess", SimpleNamespace(run=fake_run))
-    assert (
-        json.loads(launch_population(config).read_text())["status"] == "TRAINED_AWAITING_EVALUATION"
-    )
+    assert json.loads(launch_population(config).read_text())["status"] == "TRAINED_AND_EVALUATED"
 
 
 def test_evaluator_replays_fixed_episodes_and_writes_registry(
