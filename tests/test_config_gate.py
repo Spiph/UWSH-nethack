@@ -22,6 +22,7 @@ from ups.sol_evaluate import checkpoint_config_path
 from ups.verifier import _evaluation_checks, _manifest_checks, _population_checks, verify_artifacts
 from ups.workflow import (
     _phase0_state_dict,
+    _population_stop_reason,
     _retained_checkpoint_records,
     checkpoint_environment_steps,
     evaluate,
@@ -513,7 +514,7 @@ def test_retained_checkpoint_selection_rejects_untrusted_records(tmp_path: Path)
         "checkpoints": [],
     }
     report_path.write_text(json.dumps({"config_hash": config.digest, "jobs": [job]}))
-    with pytest.raises(ValueError, match="exactly one final"):
+    with pytest.raises(ValueError, match="no retained checkpoint"):
         _retained_checkpoint_records(config)
     missing = config.artifact_root / "missing.pth"
     job["checkpoints"] = [
@@ -534,6 +535,29 @@ def test_retained_checkpoint_selection_rejects_untrusted_records(tmp_path: Path)
     report_path.write_text(json.dumps({"config_hash": config.digest, "jobs": [job, job]}))
     with pytest.raises(ValueError, match="duplicate final"):
         _retained_checkpoint_records(config)
+    later = config.artifact_root / "checkpoint-later.pth"
+    later.write_bytes(b"later")
+    early_config = config.model_copy(
+        update={"training": config.training.model_copy(update={"max_environment_steps": 192})}
+    )
+    job["checkpoints"] = [
+        {
+            "target_environment_steps": 64,
+            "checkpoint": str(checkpoint),
+            "checkpoint_sha256": sha256_file(checkpoint),
+            "evaluation": {"qualified": True},
+        },
+        {
+            "target_environment_steps": 128,
+            "checkpoint": str(later),
+            "checkpoint_sha256": sha256_file(later),
+            "evaluation": {"qualified": True},
+        },
+    ]
+    report_path.write_text(json.dumps({"config_hash": early_config.digest, "jobs": [job]}))
+    retained = _retained_checkpoint_records(early_config)
+    assert retained is not None
+    assert retained[(config.environments[0], 0)]["checkpoint"] == str(later)
 
 
 def test_verifier_rejects_bad_evaluation_registry(tmp_path: Path) -> None:
@@ -601,6 +625,28 @@ def test_population_plan_is_exact_and_deterministic(tmp_path: Path) -> None:
     )
 
 
+def test_population_stops_only_after_stable_competence_or_cap(tmp_path: Path) -> None:
+    config = load_config(ROOT / "configs/smoke.yaml").model_copy(
+        update={"artifact_root": tmp_path / "run"}
+    )
+    first = {"target_environment_steps": 64, "evaluation": {"qualified": True}}
+    second = {"target_environment_steps": 128, "evaluation": {"qualified": True}}
+    assert _population_stop_reason(config, []) is None
+    assert _population_stop_reason(config, [first]) is None
+    assert _population_stop_reason(config, [first, second]) == "MAX_ENVIRONMENT_STEPS"
+    config = config.model_copy(
+        update={"training": config.training.model_copy(update={"max_environment_steps": 192})}
+    )
+    assert _population_stop_reason(config, [first, second]) == "STABLE_COMPETENCE"
+    assert (
+        _population_stop_reason(
+            config,
+            [first, {"target_environment_steps": 128, "evaluation": {"qualified": False}}],
+        )
+        is None
+    )
+
+
 def test_population_launcher_records_resumable_chunks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
@@ -657,6 +703,58 @@ def test_population_launcher_records_resumable_chunks(
     resumed_payload = json.loads(resumed.read_text())
     assert resumed_payload["status"] == "TRAINED_AND_EVALUATED"
     assert isinstance(resumed_payload["jobs"][0]["checkpoints"][0]["evaluation"], dict)
+
+
+def test_population_launcher_uses_auditable_stable_competence_stop(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    config = load_config(ROOT / "configs/smoke.yaml").model_copy(
+        update={
+            "artifact_root": tmp_path / "run",
+            "training": load_config(ROOT / "configs/smoke.yaml").training.model_copy(
+                update={"max_environment_steps": 192}
+            ),
+        }
+    )
+    monkeypatch.setenv("SOL_COMMIT", "7c272b66e6ebe72ca008526d33f7e2e40e660af5")
+
+    def fake_run(command: list[str], check: bool) -> None:
+        assert check is True
+        if "ups.sol_evaluate" in command:
+            checkpoint = Path(command[command.index("--checkpoint") + 1])
+            experiment = command[command.index("--experiment") + 1]
+            evaluations = config.artifact_root / "evaluations"
+            evaluations.mkdir(parents=True, exist_ok=True)
+            (evaluations / f"{experiment}.json").write_text(
+                json.dumps(
+                    {
+                        "episodes": config.training.evaluation_episodes,
+                        "checkpoint_sha256": sha256_file(checkpoint),
+                        "eval_seed": 1101,
+                        "success_rate": 1.0,
+                        "median_return": 1.0,
+                        "table": str(evaluations / f"{experiment}.parquet"),
+                    }
+                )
+            )
+            return
+        experiment = command[command.index("--experiment") + 1]
+        target = command[command.index("--max-steps") + 1]
+        checkpoint = (
+            config.artifact_root
+            / "sample_factory"
+            / experiment
+            / "checkpoint_p0"
+            / f"checkpoint_{target}.pth"
+        )
+        checkpoint.parent.mkdir(parents=True, exist_ok=True)
+        checkpoint.write_text(target)
+
+    monkeypatch.setattr("ups.workflow.subprocess", SimpleNamespace(run=fake_run))
+    report = json.loads(launch_population(config).read_text())
+    job = report["jobs"][0]
+    assert [record["target_environment_steps"] for record in job["checkpoints"]] == [64, 128]
+    assert job["stop_reason"] == "STABLE_COMPETENCE"
 
 
 def test_population_launcher_recovers_malformed_progress_report(

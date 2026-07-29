@@ -88,7 +88,7 @@ def _population_checks(config: Phase0Config) -> tuple[bool, list[str]]:
             expected_pairs = {
                 (environment, seed) for environment in config.environments for seed in config.seeds
             }
-            expected_targets = set(
+            expected_targets = list(
                 range(
                     config.training.evaluation_interval,
                     config.training.max_environment_steps + config.training.evaluation_interval,
@@ -107,10 +107,21 @@ def _population_checks(config: Phase0Config) -> tuple[bool, list[str]]:
                     for checkpoint in checkpoints
                     if isinstance(checkpoint, dict)
                 ]
-                if set(targets) != expected_targets or len(targets) != len(expected_targets):
+                if not targets or targets != expected_targets[: len(targets)]:
                     training_failures.append(
-                        "training report does not contain the exact configured checkpoint schedule"
+                        "training report does not contain a configured checkpoint schedule prefix"
                     )
+                elif targets[-1] != config.training.max_environment_steps:
+                    recent = checkpoints[-2:]
+                    if len(recent) != 2 or not all(
+                        isinstance(record, dict)
+                        and isinstance(record.get("evaluation"), dict)
+                        and record["evaluation"].get("qualified") is True
+                        for record in recent
+                    ):
+                        training_failures.append(
+                            "early-stopped policy lacks two consecutive qualifying evaluations"
+                        )
                 for checkpoint in checkpoints:
                     if not isinstance(checkpoint, dict):
                         training_failures.append("invalid checkpoint record")

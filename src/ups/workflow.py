@@ -32,6 +32,8 @@ from ups.model import RecurrentNLEPolicy
 from ups.nulls import gaussian_norm_matched, spectrum_matched_orientation
 from ups.subspace import fit_svd, hosvd, hosvd_reconstruct
 
+STABLE_COMPETENCE_EVALUATIONS = 2
+
 
 def stage_path(config: Phase0Config, name: str) -> Path:
     return config.artifact_root / "stages" / f"{name}.json"
@@ -242,6 +244,26 @@ def checkpoint_environment_steps(checkpoint: Path) -> int:
     return int(match.group(1))
 
 
+def _population_stop_reason(config: Phase0Config, checkpoints: list[dict[str, Any]]) -> str | None:
+    """Return the auditable preregistered endpoint for a policy training run."""
+    if not checkpoints:
+        return None
+    targets = [record.get("target_environment_steps") for record in checkpoints]
+    if config.training.max_environment_steps in targets and all(
+        isinstance(record.get("evaluation"), dict) for record in checkpoints
+    ):
+        return "MAX_ENVIRONMENT_STEPS"
+    recent = checkpoints[-STABLE_COMPETENCE_EVALUATIONS:]
+    if len(recent) != STABLE_COMPETENCE_EVALUATIONS:
+        return None
+    if all(
+        isinstance(record.get("evaluation"), dict) and record["evaluation"].get("qualified") is True
+        for record in recent
+    ):
+        return "STABLE_COMPETENCE"
+    return None
+
+
 def launch_population(
     config: Phase0Config,
     plan_only: bool = False,
@@ -302,7 +324,10 @@ def launch_population(
     for job in selected_jobs:
         experiment_root = config.artifact_root / "sample_factory" / job["experiment"]
         checkpoints = list(prior.get((job["environment"], job["seed"]), {}).get("checkpoints", []))
+        stop_reason: str | None = _population_stop_reason(config, checkpoints)
         for target in range(interval, config.training.max_environment_steps + interval, interval):
+            if stop_reason is not None:
+                break
             existing = next(
                 (
                     record
@@ -332,6 +357,7 @@ def launch_population(
                             "qualified_population": False,
                         },
                     )
+                stop_reason = _population_stop_reason(config, checkpoints)
                 continue
             command = [
                 sys.executable,
@@ -389,6 +415,17 @@ def launch_population(
             checkpoint_record["evaluation"] = _evaluate_population_checkpoint(
                 config, job, checkpoint_record
             )
+            stop_reason = _population_stop_reason(config, checkpoints)
+            job_records = [
+                {
+                    **existing,
+                    "checkpoints": checkpoints,
+                    "stop_reason": stop_reason,
+                }
+                if (existing["environment"], existing["seed"]) == (job["environment"], job["seed"])
+                else existing
+                for existing in job_records
+            ]
             atomic_json(
                 report,
                 {
@@ -398,11 +435,12 @@ def launch_population(
                     "qualified_population": False,
                 },
             )
-        if not any(
-            (record["environment"], record["seed"]) == (job["environment"], job["seed"])
+        job_records = [
+            record
             for record in job_records
-        ):
-            job_records.append({**job, "checkpoints": checkpoints})
+            if (record["environment"], record["seed"]) != (job["environment"], job["seed"])
+        ]
+        job_records.append({**job, "checkpoints": checkpoints, "stop_reason": stop_reason})
     atomic_json(
         report,
         {
@@ -575,18 +613,25 @@ def _retained_checkpoint_records(
         environment, seed = job.get("environment"), job.get("seed")
         if not isinstance(environment, str) or not isinstance(seed, int):
             raise ValueError("invalid task/seed record in training report for extraction")
-        final = [
-            record
-            for record in job.get("checkpoints", [])
-            if isinstance(record, dict)
-            and record.get("target_environment_steps") == config.training.max_environment_steps
-        ]
-        if len(final) != 1:
+        checkpoints = [record for record in job.get("checkpoints", []) if isinstance(record, dict)]
+        if not checkpoints:
             raise ValueError(
-                "training report must contain exactly one final checkpoint for "
-                f"{environment}:seed{seed}"
+                f"training report has no retained checkpoint for {environment}:seed{seed}"
             )
-        record = final[0]
+        checkpoints.sort(key=lambda record: record.get("target_environment_steps", -1))
+        record = checkpoints[-1]
+        terminal_target = record.get("target_environment_steps")
+        if terminal_target != config.training.max_environment_steps:
+            recent = checkpoints[-STABLE_COMPETENCE_EVALUATIONS:]
+            if len(recent) != STABLE_COMPETENCE_EVALUATIONS or not all(
+                isinstance(candidate.get("evaluation"), dict)
+                and candidate["evaluation"].get("qualified") is True
+                for candidate in recent
+            ):
+                raise ValueError(
+                    "early-stopped policy lacks two consecutive qualifying evaluations for "
+                    f"{environment}:seed{seed}"
+                )
         checkpoint = Path(record.get("checkpoint", ""))
         digest = record.get("checkpoint_sha256")
         if (
