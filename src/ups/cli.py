@@ -36,8 +36,24 @@ def train(
     sol_smoke: bool = False,
     resume: bool = False,
     plan_only: bool = False,
+    only_environment: str | None = typer.Option(
+        None, help="Run one preregistered environment for a resumable pilot."
+    ),
+    only_seed: int | None = typer.Option(
+        None, help="Run one preregistered seed for a resumable pilot."
+    ),
 ) -> None:
-    typer.echo(run_train(load_config(config), reduced, sol_smoke, resume, plan_only))
+    typer.echo(
+        run_train(
+            load_config(config),
+            reduced,
+            sol_smoke,
+            resume,
+            plan_only,
+            only_environment,
+            only_seed,
+        )
+    )
 
 
 @app.command()

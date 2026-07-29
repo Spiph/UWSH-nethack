@@ -78,6 +78,8 @@ def train(
     sol_smoke: bool = False,
     resume: bool = False,
     plan_only: bool = False,
+    only_environment: str | None = None,
+    only_seed: int | None = None,
 ) -> Path:
     """Create deterministic smoke checkpoints or declare the full APPO launch contract."""
     if sol_smoke:
@@ -121,7 +123,12 @@ def train(
             },
         )
     if not reduced:
-        return launch_population(config, plan_only=plan_only)
+        return launch_population(
+            config,
+            plan_only=plan_only,
+            only_environment=only_environment,
+            only_seed=only_seed,
+        )
     torch.manual_seed(config.seeds[0])
     model = RecurrentNLEPolicy(glyph_vocab=128, crop_size=5, hidden_size=32)
     checkpoint = config.artifact_root / "checkpoints" / "smoke-policy.pt"
@@ -235,7 +242,12 @@ def checkpoint_environment_steps(checkpoint: Path) -> int:
     return int(match.group(1))
 
 
-def launch_population(config: Phase0Config, plan_only: bool = False) -> Path:
+def launch_population(
+    config: Phase0Config,
+    plan_only: bool = False,
+    only_environment: str | None = None,
+    only_seed: int | None = None,
+) -> Path:
     """Launch exactly the preregistered jobs in resumable 100k-step chunks.
 
     Every produced checkpoint is immediately evaluated on the fixed episode set.
@@ -243,6 +255,14 @@ def launch_population(config: Phase0Config, plan_only: bool = False) -> Path:
     a resumed run cannot silently bypass evidence for a completed 100k segment.
     """
     jobs = population_jobs(config)
+    selected_jobs = [
+        job
+        for job in jobs
+        if (only_environment is None or job["environment"] == only_environment)
+        and (only_seed is None or job["seed"] == only_seed)
+    ]
+    if not selected_jobs:
+        raise ValueError("population selection does not match a preregistered task/seed job")
     population_root = config.artifact_root / "population"
     population_root.mkdir(parents=True, exist_ok=True)
     plan_path = population_root / "population_plan.json"
@@ -279,7 +299,7 @@ def launch_population(config: Phase0Config, plan_only: bool = False) -> Path:
         prior[key] for key in ((job["environment"], job["seed"]) for job in jobs) if key in prior
     ]
     interval = config.training.evaluation_interval
-    for job in jobs:
+    for job in selected_jobs:
         experiment_root = config.artifact_root / "sample_factory" / job["experiment"]
         checkpoints = list(prior.get((job["environment"], job["seed"]), {}).get("checkpoints", []))
         for target in range(interval, config.training.max_environment_steps + interval, interval):
@@ -401,6 +421,7 @@ def launch_population(config: Phase0Config, plan_only: bool = False) -> Path:
             "jobs": job_records,
             "training_report": str(report),
             "full_population": len(job_records) == len(jobs),
+            "selected_jobs": selected_jobs,
             "phase_one_authorized": False,
         },
     )
