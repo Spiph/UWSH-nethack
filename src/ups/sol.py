@@ -1,5 +1,5 @@
 # mypy: ignore-errors
-"""SOL/Sample Factory integration for the Phase Zero MiniHack population.
+"""SOL/Sample Factory integration for MiniHack and the NLE score baseline.
 
 This module is deliberately imported only inside the ``sol_patched`` container.
 The development dependency set does not include SOL's patched NLE or its Sample
@@ -19,7 +19,16 @@ PHASE0_ENVIRONMENTS = (
     "MiniHack-Room-Dark-5x5-v0",
     "MiniHack-Room-Monster-5x5-v0",
     "MiniHack-Room-Trap-5x5-v0",
+    "MiniHack-Room-Ultimate-5x5-v0",
+    "MiniHack-MazeWalk-9x9-v0",
 )
+
+# This is a deliberately separate behavioral baseline, not a seventh member of
+# the eight-action MiniHack weight population.  NetHackScore exposes the native
+# 23-action NLE interface, so its policy head cannot be pooled with the
+# MiniHack heads for a shared-update geometry claim.
+NETHACK_BASELINE_ENVIRONMENTS = ("NetHackScore-v0",)
+STUDY_ENVIRONMENTS = PHASE0_ENVIRONMENTS + NETHACK_BASELINE_ENVIRONMENTS
 
 
 def _runtime_imports() -> tuple[Any, Any, Any, Any, Any]:
@@ -73,10 +82,21 @@ def crop_glyphs(glyphs: np.ndarray, blstats: np.ndarray, crop_size: int) -> np.n
 def make_phase0_env(
     full_env_name: str, cfg: Any, env_config: Any, render_mode: str | None = None
 ) -> Any:
-    """Make a MiniHack room task with exactly eight compass actions and a glyph crop."""
+    """Make a study environment with a glyph crop and its preregistered actions.
+
+    MiniHack tasks retain the common eight-compass interface.  The NLE score
+    baseline intentionally retains NLE's native 23 actions, avoiding a
+    movement-only surrogate that would not be a meaningful NetHack baseline.
+    """
     gym, _, _, _, _ = _runtime_imports()
-    # MiniHack registers its Gymnasium task IDs as an import side effect.
-    import minihack  # noqa: F401
+    if full_env_name in NETHACK_BASELINE_ENVIRONMENTS:
+        # NLE registers the canonical NetHack benchmark IDs as an import side
+        # effect.  Do not import MiniHack here: its reward/task wrappers are
+        # not part of the native score baseline.
+        import nle.env  # noqa: F401
+    else:
+        # MiniHack registers its Gymnasium task IDs as an import side effect.
+        import minihack  # noqa: F401
 
     class Phase0Observation(gym.ObservationWrapper):
         def __init__(self, env: Any) -> None:
@@ -116,8 +136,10 @@ def make_phase0_env(
                 raise ValueError(f"invalid Phase Zero action {action}")
             return self._actions[int(action)]
 
-    environment = gym.make(full_env_name, render_mode=render_mode)
-    return EightCompassActions(Phase0Observation(environment))
+    environment = Phase0Observation(gym.make(full_env_name, render_mode=render_mode))
+    if full_env_name in NETHACK_BASELINE_ENVIRONMENTS:
+        return environment
+    return EightCompassActions(environment)
 
 
 def make_phase0_encoder(cfg: Any, obs_space: Any) -> Any:
@@ -165,8 +187,8 @@ def make_phase0_encoder(cfg: Any, obs_space: Any) -> Any:
 
 
 def register_phase0_components() -> None:
-    """Register the fixed MiniHack tasks and the Phase Zero encoder with SOL."""
+    """Register the study environments and common glyph encoder with SOL."""
     _, _, global_model_factory, register_env, _ = _runtime_imports()
-    for environment in PHASE0_ENVIRONMENTS:
+    for environment in STUDY_ENVIRONMENTS:
         register_env(environment, make_phase0_env)
     global_model_factory().register_encoder_factory(make_phase0_encoder)

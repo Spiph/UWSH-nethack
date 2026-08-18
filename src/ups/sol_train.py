@@ -7,16 +7,19 @@ import argparse
 import sys
 from pathlib import Path
 
-from ups.sol import PHASE0_ENVIRONMENTS, register_phase0_components
+from ups.sol import STUDY_ENVIRONMENTS, register_phase0_components
 
 
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(description=__doc__)
-    command.add_argument("--environment", choices=PHASE0_ENVIRONMENTS, required=True)
+    command.add_argument("--environment", choices=STUDY_ENVIRONMENTS, required=True)
     command.add_argument("--seed", type=int, required=True)
     command.add_argument("--artifact-root", type=Path, required=True)
     command.add_argument("--max-steps", type=int, required=True)
     command.add_argument("--experiment", required=True)
+    command.add_argument("--checkpoint-retention", type=int, default=32)
+    command.add_argument("--checkpoint-save-interval-seconds", type=int, default=3600)
+    command.add_argument("--heartbeat-reporting-interval-seconds", type=int, default=3600)
     command.add_argument("--resume", action="store_true")
     command.add_argument("--smoke", action="store_true")
     return command
@@ -49,6 +52,9 @@ def main(argv: list[str] | None = None) -> int:
         # handle failures in containerized single-GPU execution.
         "--serial_mode=True",
         "--async_rl=False",
+        # The serial runtime must tolerate a recoverable host pause without
+        # turning a checkpointed run into a scientific dropout.
+        f"--heartbeat_reporting_interval={args.heartbeat_reporting_interval_seconds}",
         "--with_wandb=False",
         "--num_workers=1",
         "--num_envs_per_worker=2",
@@ -56,9 +62,10 @@ def main(argv: list[str] | None = None) -> int:
         # serial mode, so the learner batch must be an exact divisor/multiple.
         "--batch_size=64",
         "--rollout=32",
-        # Gate Zero analyzes every 100k checkpoint, so the runtime must not
-        # garbage-collect earlier records before the verifier can inspect them.
-        "--keep_checkpoints=20",
+        # Each 100k segment saves its final checkpoint. Delaying periodic saves
+        # beyond one segment prevents them from evicting scientific checkpoints.
+        f"--save_every_sec={args.checkpoint_save_interval_seconds}",
+        f"--keep_checkpoints={args.checkpoint_retention}",
         "--device=cpu" if args.smoke else "--device=gpu",
     ]
     if args.resume:

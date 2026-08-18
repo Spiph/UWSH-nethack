@@ -1,43 +1,40 @@
 schema_version: 1
-study: phase0
-artifact_root: artifacts/phase0-confirmatory-r2
-# Disjoint from the observed pilot seeds 0 and 1.
-seeds: [10, 11, 12, 13, 14]
-environments:
-  - MiniHack-Room-Random-5x5-v0
-  - MiniHack-Room-Dark-5x5-v0
-  - MiniHack-Room-Monster-5x5-v0
-  - MiniHack-Room-Trap-5x5-v0
-  - MiniHack-Room-Ultimate-5x5-v0
-  - MiniHack-MazeWalk-9x9-v0
+study: nethack-baseline
+# Deliberately isolated: the native 23-action score policy is behavioral
+# context, not a compatible member of the eight-action MiniHack subspace.
+artifact_root: artifacts/nethack-baseline
+# Disjoint from both the observed pilot (0, 1) and the MiniHack confirmation
+# cohort (10-14).
+seeds: [20, 21, 22, 23, 24]
+environments: [NetHackScore-v0]
 experimental_design:
   training_seed_count: 5
-  environment_families: [room, maze]
+  environment_families: [nethack]
   evaluation_seed_policy: fixed_per_environment
 training:
   algorithm: APPO
   runtime: sol_patched
   max_environment_steps: 2000000
-  evaluation_interval: 100000
-  evaluation_episodes: 200
-  minimum_success: 0.75
-  # 20 fixed-evaluation checkpoints plus recovery headroom. Periodic saves are
-  # delayed past one 100k segment so they cannot evict scientific checkpoints.
+  evaluation_interval: 200000
+  evaluation_episodes: 50
+  # NetHackScore has no MiniHack task-success endpoint. The shared field is
+  # ignored for this score-return baseline; mean NLE score is the outcome.
+  minimum_success: 0.0
   checkpoint_retention: 32
   checkpoint_save_interval_seconds: 3600
-  # Tolerates a recoverable host pause without terminating a valid resumable run.
   heartbeat_reporting_interval_seconds: 3600
 evaluation_buffer:
   sequences: 512
   sequence_length: 32
-  fixed_seeds: [1101, 1102, 1103, 1104, 1105, 1106]
+  fixed_seeds: [2101]
 analysis:
   primary_modules: [encoder, actor]
   explained_variance: 0.95
   null_replicates: 1000
   bootstrap_replicates: 1000
-  # Prespecified absolute success-rate lift for the power diagnostic.
-  practical_effect_size: 0.05
+  # One raw NLE score point is the prespecified practical effect for the
+  # baseline's score-return learning-curve power diagnostic.
+  practical_effect_size: 1.0
   leave_one_task_out: true
 adapters:
   repositories:

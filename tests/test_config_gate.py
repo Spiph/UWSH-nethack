@@ -11,8 +11,9 @@ from safetensors.torch import load_file
 
 import ups.gate as gate_module
 from ups.artifacts import sha256_file
-from ups.config import load_config
+from ups.config import Phase0Config, load_config
 from ups.gate import (
+    PREREGISTERED_PHASE0_CONFIG_HASH,
     REQUIRED_NUMERICAL_CHECKS,
     _has_geometry,
     _null_ensemble_counts,
@@ -24,6 +25,7 @@ from ups.workflow import (
     _phase0_state_dict,
     _population_stop_reason,
     _retained_checkpoint_records,
+    _upsert_population_job,
     checkpoint_environment_steps,
     evaluate,
     extract_updates,
@@ -57,6 +59,73 @@ def test_config_hash_is_stable_and_schema_is_strict(tmp_path: Path) -> None:
     bad.write_text(raw + "\nunknown: true\n")
     with pytest.raises(ValidationError):
         load_config(bad)
+
+
+def test_full_study_declares_five_seeds_and_diverse_environment_cohort() -> None:
+    config = load_config(ROOT / "configs/phase0.yaml")
+    assert config.digest == PREREGISTERED_PHASE0_CONFIG_HASH
+    assert config.seeds == [10, 11, 12, 13, 14]
+    assert set(config.seeds).isdisjoint({0, 1})
+    assert len(config.environments) == 6
+    assert config.experimental_design is not None
+    assert config.experimental_design.training_seed_count == len(config.seeds)
+    assert set(config.experimental_design.environment_families) == {"room", "maze"}
+    assert config.analysis.practical_effect_size == 0.05
+    assert config.training.checkpoint_retention == 32
+    assert config.training.checkpoint_save_interval_seconds == 3600
+    assert config.training.heartbeat_reporting_interval_seconds == 3600
+
+    nethack_baseline = load_config(ROOT / "configs/nethack_baseline.yaml")
+    assert nethack_baseline.seeds == [20, 21, 22, 23, 24]
+    assert nethack_baseline.environments == ["NetHackScore-v0"]
+    assert nethack_baseline.analysis.practical_effect_size == 1.0
+
+    raw = config.model_dump(mode="python")
+    raw["seeds"] = [10, 11, 12, 13]
+    with pytest.raises(ValidationError, match="five preset"):
+        Phase0Config.model_validate(raw)
+
+    raw = config.model_dump(mode="python")
+    raw["evaluation_buffer"]["fixed_seeds"] = [0, 1102, 1103, 1104, 1105, 1106]
+    with pytest.raises(ValidationError, match="disjoint"):
+        Phase0Config.model_validate(raw)
+
+    invalid_cases = (
+        ("seeds", [10, 11, 12, 13, 13], "unique"),
+        (
+            "environments",
+            [*config.environments[:-1], config.environments[0]],
+            "unique",
+        ),
+        ("seeds", [10, 11, 12, 13, -1], "non-negative"),
+    )
+    for field, value, message in invalid_cases:
+        raw = config.model_dump(mode="python")
+        raw[field] = value
+        with pytest.raises(ValidationError, match=message):
+            Phase0Config.model_validate(raw)
+
+    raw = config.model_dump(mode="python")
+    raw["evaluation_buffer"]["fixed_seeds"][0] = -1
+    with pytest.raises(ValidationError, match="non-negative"):
+        Phase0Config.model_validate(raw)
+    raw = config.model_dump(mode="python")
+    raw["experimental_design"] = None
+    with pytest.raises(ValidationError, match="experimental_design"):
+        Phase0Config.model_validate(raw)
+    raw = config.model_dump(mode="python")
+    raw["experimental_design"]["training_seed_count"] = 4
+    with pytest.raises(ValidationError, match="seed count"):
+        Phase0Config.model_validate(raw)
+
+    smoke = load_config(ROOT / "configs/smoke.yaml").model_dump(mode="python")
+    smoke["experimental_design"] = {
+        "training_seed_count": 2,
+        "environment_families": ["room"],
+        "evaluation_seed_policy": "fixed_per_environment",
+    }
+    with pytest.raises(ValidationError, match="seed count"):
+        Phase0Config.model_validate(smoke)
 
 
 def test_gate_rejects_self_declared_complete_evidence() -> None:
@@ -204,6 +273,7 @@ def test_verifier_accepts_intact_provenance_shell(tmp_path: Path) -> None:
     evaluations = config.artifact_root / "evaluations"
     evaluations.mkdir(parents=True)
     raw_table = evaluations / "raw.parquet"
+    raw_table_earlier = evaluations / "raw-earlier.parquet"
     checkpoint_path = str(config.artifact_root / "checkpoint_128.pth")
     checkpoint_earlier = config.artifact_root / "checkpoint_64.pth"
     Path(checkpoint_path).write_bytes(b"checkpoint")
@@ -238,7 +308,7 @@ def test_verifier_accepts_intact_provenance_shell(tmp_path: Path) -> None:
             }
         )
     )
-    pd.DataFrame(
+    raw_frame = pd.DataFrame(
         {
             "environment": [config.environments[0], config.environments[0]],
             "checkpoint": [checkpoint_path, checkpoint_path],
@@ -247,12 +317,53 @@ def test_verifier_accepts_intact_provenance_shell(tmp_path: Path) -> None:
             "seed": [1101, 1102],
             "success": [True, True],
             "return": [1.0, 1.0],
+            "steps": [1, 1],
             "terminated": [True, True],
             "truncated": [False, False],
+            "trajectory": [
+                json.dumps(
+                    [
+                        {
+                            "observation": {"glyphs_crop": [[0]], "blstats": [0, 0]},
+                            "action": 0,
+                            "reward": 1.0,
+                            "next_observation": {
+                                "glyphs_crop": [[0]],
+                                "blstats": [0, 0],
+                            },
+                            "info": {"end_status": "TASK_SUCCESSFUL"},
+                            "terminated": True,
+                            "truncated": False,
+                        }
+                    ]
+                )
+            ]
+            * 2,
         }
-    ).to_parquet(raw_table, index=False)
+    )
+    raw_frame.to_parquet(raw_table, index=False)
+    earlier_frame = raw_frame.assign(
+        checkpoint=str(checkpoint_earlier),
+        checkpoint_sha256=sha256_file(checkpoint_earlier),
+    )
+    earlier_frame.to_parquet(raw_table_earlier, index=False)
     pd.DataFrame(
         [
+            {
+                "environment": config.environments[0],
+                "seed": config.seeds[0],
+                "target_environment_steps": config.training.evaluation_interval,
+                "checkpoint": str(checkpoint_earlier),
+                "checkpoint_sha256": sha256_file(checkpoint_earlier),
+                "success_rate": 1.0,
+                "mean_return": 1.0,
+                "median_return": 1.0,
+                "mean_length": 1.0,
+                "action_selection": "greedy_argmax",
+                "episodes": config.training.evaluation_episodes,
+                "evaluation_table": str(raw_table_earlier),
+                "max_episode_steps": None,
+            },
             {
                 "environment": config.environments[0],
                 "seed": config.seeds[0],
@@ -260,11 +371,14 @@ def test_verifier_accepts_intact_provenance_shell(tmp_path: Path) -> None:
                 "checkpoint": checkpoint_path,
                 "checkpoint_sha256": checkpoint_hash,
                 "success_rate": 1.0,
+                "mean_return": 1.0,
                 "median_return": 1.0,
+                "mean_length": 1.0,
+                "action_selection": "greedy_argmax",
                 "episodes": config.training.evaluation_episodes,
                 "evaluation_table": str(raw_table),
                 "max_episode_steps": None,
-            }
+            },
         ]
     ).to_parquet(evaluations / "policy_registry.parquet", index=False)
     (evaluations / "evaluation_report.json").write_text(
@@ -288,6 +402,9 @@ def test_verifier_accepts_intact_provenance_shell(tmp_path: Path) -> None:
     )
     assert result["verified"] is True
     registry = pd.read_parquet(evaluations / "policy_registry.parquet")
+    final_index = registry.index[
+        registry["target_environment_steps"] == config.training.max_environment_steps
+    ][0]
     raw_valid = pd.read_parquet(raw_table)
     for column, values in (
         ("episode", [1, 0]),
@@ -305,29 +422,29 @@ def test_verifier_accepts_intact_provenance_shell(tmp_path: Path) -> None:
     low_quality = raw_valid.copy()
     low_quality["success"] = [True, False]
     low_quality.to_parquet(raw_table, index=False)
-    registry.loc[0, "success_rate"] = 0.5
-    registry.loc[0, "median_return"] = 1.0
+    registry.loc[final_index, "success_rate"] = 0.5
+    registry.loc[final_index, "median_return"] = 1.0
     registry.to_parquet(evaluations / "policy_registry.parquet", index=False)
     assert _evaluation_checks(config)[0] is False
     raw_valid.to_parquet(raw_table, index=False)
-    registry.loc[0, "success_rate"] = 1.0
+    registry.loc[final_index, "success_rate"] = 1.0
     registry.to_parquet(evaluations / "policy_registry.parquet", index=False)
     pd.DataFrame(columns=raw_valid.columns).to_parquet(raw_table, index=False)
     assert _evaluation_checks(config)[0] is False
     raw_valid.to_parquet(raw_table, index=False)
-    registry.loc[0, "environment"] = "unknown"
+    registry.loc[final_index, "environment"] = "unknown"
     registry.to_parquet(evaluations / "policy_registry.parquet", index=False)
     assert _evaluation_checks(config)[0] is False
-    registry.loc[0, "environment"] = config.environments[0]
+    registry.loc[final_index, "environment"] = config.environments[0]
     registry.to_parquet(evaluations / "policy_registry.parquet", index=False)
     Path(checkpoint_path).write_bytes(b"tampered")
     assert _evaluation_checks(config)[0] is False
     Path(checkpoint_path).write_bytes(b"checkpoint")
     registry = pd.read_parquet(evaluations / "policy_registry.parquet")
-    registry.loc[0, "checkpoint_sha256"] = sha256_file(Path(checkpoint_path))
+    registry.loc[final_index, "checkpoint_sha256"] = sha256_file(Path(checkpoint_path))
     registry.to_parquet(evaluations / "policy_registry.parquet", index=False)
     registry = pd.read_parquet(evaluations / "policy_registry.parquet")
-    registry.loc[0, "success_rate"] = 0.0
+    registry.loc[final_index, "success_rate"] = 0.0
     registry.to_parquet(evaluations / "policy_registry.parquet", index=False)
     assert (
         verify_artifacts(
@@ -555,9 +672,8 @@ def test_retained_checkpoint_selection_rejects_untrusted_records(tmp_path: Path)
         },
     ]
     report_path.write_text(json.dumps({"config_hash": early_config.digest, "jobs": [job]}))
-    retained = _retained_checkpoint_records(early_config)
-    assert retained is not None
-    assert retained[(config.environments[0], 0)]["checkpoint"] == str(later)
+    with pytest.raises(ValueError, match="maximum budget"):
+        _retained_checkpoint_records(early_config)
 
 
 def test_verifier_rejects_bad_evaluation_registry(tmp_path: Path) -> None:
@@ -608,6 +724,16 @@ def test_sol_smoke_launch_records_sample_factory_artifact(
     assert payload["resume"] is True
 
 
+def test_sol_launcher_uses_preregistered_serial_gpu_recovery_settings() -> None:
+    launcher = (ROOT / "src/ups/sol_train.py").read_text(encoding="utf-8")
+    assert '"--serial_mode=True"' in launcher
+    assert (
+        '"--heartbeat_reporting_interval={args.heartbeat_reporting_interval_seconds}"' in launcher
+    )
+    assert '"--save_every_sec={args.checkpoint_save_interval_seconds}"' in launcher
+    assert '"--keep_checkpoints={args.checkpoint_retention}"' in launcher
+
+
 def test_population_plan_is_exact_and_deterministic(tmp_path: Path) -> None:
     config = load_config(ROOT / "configs/smoke.yaml").model_copy(
         update={"artifact_root": tmp_path / "run"}
@@ -625,7 +751,22 @@ def test_population_plan_is_exact_and_deterministic(tmp_path: Path) -> None:
     )
 
 
-def test_population_stops_only_after_stable_competence_or_cap(tmp_path: Path) -> None:
+def test_population_checkpoint_upsert_does_not_alias_or_replace_peer_jobs() -> None:
+    checkpoints = [{"target_environment_steps": 100}]
+    records = [
+        {"environment": "env-a", "seed": 0, "checkpoints": []},
+        {"environment": "env-b", "seed": 1, "checkpoints": [{"target_environment_steps": 50}]},
+    ]
+    job = {"environment": "env-a", "seed": 0, "experiment": "env-a-seed0"}
+    updated = _upsert_population_job(records, job, checkpoints)
+    updated_by_key = {(record["environment"], record["seed"]): record for record in updated}
+    assert updated_by_key[("env-a", 0)]["checkpoints"] is checkpoints
+    assert updated_by_key[("env-b", 1)]["checkpoints"] == [{"target_environment_steps": 50}]
+    checkpoints.append({"target_environment_steps": 200})
+    assert len(updated_by_key[("env-b", 1)]["checkpoints"]) == 1
+
+
+def test_population_stops_only_at_preregistered_budget(tmp_path: Path) -> None:
     config = load_config(ROOT / "configs/smoke.yaml").model_copy(
         update={"artifact_root": tmp_path / "run"}
     )
@@ -637,7 +778,7 @@ def test_population_stops_only_after_stable_competence_or_cap(tmp_path: Path) ->
     config = config.model_copy(
         update={"training": config.training.model_copy(update={"max_environment_steps": 192})}
     )
-    assert _population_stop_reason(config, [first, second]) == "STABLE_COMPETENCE"
+    assert _population_stop_reason(config, [first, second]) is None
     assert (
         _population_stop_reason(
             config,
@@ -651,7 +792,7 @@ def test_population_launcher_records_resumable_chunks(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = load_config(ROOT / "configs/smoke.yaml").model_copy(
-        update={"artifact_root": tmp_path / "run"}
+        update={"artifact_root": tmp_path / "run", "seeds": [0, 1]}
     )
     monkeypatch.setenv("SOL_COMMIT", "7c272b66e6ebe72ca008526d33f7e2e40e660af5")
 
@@ -668,8 +809,11 @@ def test_population_launcher_records_resumable_chunks(
                         "episodes": config.training.evaluation_episodes,
                         "checkpoint_sha256": sha256_file(checkpoint),
                         "eval_seed": 1101,
+                        "action_selection": "greedy_argmax",
                         "success_rate": 0.0,
+                        "mean_return": 0.0,
                         "median_return": 0.0,
+                        "mean_length": 1.0,
                         "table": str(evaluations / f"{experiment}.parquet"),
                     }
                 )
@@ -691,10 +835,11 @@ def test_population_launcher_records_resumable_chunks(
     stage = launch_population(config)
     payload = json.loads(stage.read_text())
     assert payload["status"] == "TRAINED_AND_EVALUATED"
-    assert len(payload["jobs"][0]["checkpoints"]) == 2
-    assert all(
-        isinstance(record["evaluation"], dict) for record in payload["jobs"][0]["checkpoints"]
-    )
+    assert len(payload["jobs"]) == 2
+    for job in payload["jobs"]:
+        assert len(job["checkpoints"]) == 2
+        assert all(isinstance(record["evaluation"], dict) for record in job["checkpoints"])
+        assert all(f"seed{job['seed']}" in record["checkpoint"] for record in job["checkpoints"])
     report_path = config.artifact_root / "population" / "training_report.json"
     report = json.loads(report_path.read_text())
     report["jobs"][0]["checkpoints"][0]["evaluation"] = "AWAITING_FIXED_EPISODE_EVALUATION"
@@ -705,7 +850,7 @@ def test_population_launcher_records_resumable_chunks(
     assert isinstance(resumed_payload["jobs"][0]["checkpoints"][0]["evaluation"], dict)
 
 
-def test_population_launcher_uses_auditable_stable_competence_stop(
+def test_population_launcher_does_not_stop_on_evaluation_performance(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     config = load_config(ROOT / "configs/smoke.yaml").model_copy(
@@ -731,8 +876,11 @@ def test_population_launcher_uses_auditable_stable_competence_stop(
                         "episodes": config.training.evaluation_episodes,
                         "checkpoint_sha256": sha256_file(checkpoint),
                         "eval_seed": 1101,
+                        "action_selection": "greedy_argmax",
                         "success_rate": 1.0,
+                        "mean_return": 1.0,
                         "median_return": 1.0,
+                        "mean_length": 1.0,
                         "table": str(evaluations / f"{experiment}.parquet"),
                     }
                 )
@@ -753,8 +901,8 @@ def test_population_launcher_uses_auditable_stable_competence_stop(
     monkeypatch.setattr("ups.workflow.subprocess", SimpleNamespace(run=fake_run))
     report = json.loads(launch_population(config).read_text())
     job = report["jobs"][0]
-    assert [record["target_environment_steps"] for record in job["checkpoints"]] == [64, 128]
-    assert job["stop_reason"] == "STABLE_COMPETENCE"
+    assert [record["target_environment_steps"] for record in job["checkpoints"]] == [64, 128, 192]
+    assert job["stop_reason"] == "MAX_ENVIRONMENT_STEPS"
 
 
 def test_population_launcher_recovers_malformed_progress_report(
@@ -780,8 +928,11 @@ def test_population_launcher_recovers_malformed_progress_report(
                         "episodes": config.training.evaluation_episodes,
                         "checkpoint_sha256": sha256_file(checkpoint),
                         "eval_seed": 1101,
+                        "action_selection": "greedy_argmax",
                         "success_rate": 0.0,
+                        "mean_return": 0.0,
                         "median_return": 0.0,
+                        "mean_length": 1.0,
                         "table": str(evaluations / f"{experiment}.parquet"),
                     }
                 )
@@ -837,7 +988,18 @@ def test_evaluator_replays_fixed_episodes_and_writes_registry(
         evaluations = config.artifact_root / "evaluations"
         evaluations.mkdir(parents=True, exist_ok=True)
         (evaluations / f"{experiment}.json").write_text(
-            json.dumps({"success_rate": 0.5, "median_return": 1.0})
+            json.dumps(
+                {
+                    "episodes": config.training.evaluation_episodes,
+                    "action_selection": "greedy_argmax",
+                    "success_rate": 0.5,
+                    "mean_return": 1.0,
+                    "median_return": 1.0,
+                    "mean_length": 1.0,
+                    "table": str(evaluations / f"{experiment}.parquet"),
+                    "max_episode_steps": None,
+                }
+            )
         )
 
     monkeypatch.setattr("ups.workflow.subprocess", SimpleNamespace(run=fake_run))

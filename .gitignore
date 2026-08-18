@@ -231,3 +231,8 @@ __marimo__/
 tensorboard/
 wandb/
 .DS_Store
+
+# Project material not published with the source code
+/docs/
+*.pdf
+*cache

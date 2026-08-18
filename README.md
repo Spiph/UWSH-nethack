@@ -1,18 +1,39 @@
 # Universal Policy Subspaces: Phase Zero
 
-This repository implements the fail-closed measurement harness for the Phase Zero
-preregistration in `Universal_Policy_Subspaces_Research_Plan.pdf`. Phase One is out of
-scope and is never launched.
+This repository implements the measurement harness for the first empirical stage
+of the universal-policy-subspace study. The goal is to determine whether
+independently trained policies share reusable weight-space coordinates that can
+support reconstruction and coefficient-only adaptation. The reproducibility
+rules, expanded five-seed cohort, uncertainty reporting, power analysis, and
+qualitative validation are specified in [`docs/DEEP_RL_PROTOCOL.md`](docs/DEEP_RL_PROTOCOL.md),
+following *Deep Reinforcement Learning that Matters*.
 
-## Current Gate Zero status
+## Current empirical status
 
-`NO_GO`. The full 12-policy, 2M-step-cap study has not been run, and the scientific
-artifact verifier is intentionally fail-closed. Smoke evidence is permanently
-labeled `SMOKE_ONLY` and cannot satisfy the gate's population checks.
+The earlier two-seed Random Room run under `artifacts/phase0/` is a pilot: it
+shows that independently initialized policies can become competent, but it cannot establish a population
+or cross-environment subspace result. The confirmatory milestone is five fixed,
+shared seeds (10--14, disjoint from the pilot's 0--1) across six environments: Random, Dark, Monster, Trap, Ultimate Room,
+and MazeWalk. Its target evidence is
+competent comparable policies, aligned weights beyond matched nulls,
+behavior-preserving reconstruction, and coefficient-only held-out adaptation.
 
-The canonical report is generated at
-`artifacts/phase0/phase0_gate.{json,md}`. A valid scientific `NO_GO` is an expected
+The verifier remains fail-closed so incomplete evidence cannot be mistaken for
+support of those claims. This is a validity guard, not the scientific result.
+
+The confirmatory cohort uses the separate `artifacts/phase0-confirmatory-r2/`
+namespace so its runs cannot resume or overwrite the observed pilot. Its report
+is generated at `artifacts/phase0-confirmatory-r2/phase0_gate.{json,md}`. A valid
+scientific `NO_GO` is an expected
 outcome; it explicitly prohibits Phase One.
+
+The earlier `artifacts/phase0-confirmatory/` execution is preserved but excluded
+after a checkpoint-retention and task/seed-registry defect; see
+[`docs/CONFIRMATORY_RUN_1_INCIDENT.md`](docs/CONFIRMATORY_RUN_1_INCIDENT.md).
+
+`configs/nethack_baseline.yaml` adds a distinct five-seed `NetHackScore-v0`
+behavioral baseline. It uses NLE's native 23 actions and score return, so it is
+never pooled into the compatible eight-action MiniHack subspace population.
 
 For command-by-command instructions, see [`docs/USAGE.md`](docs/USAGE.md).
 
@@ -45,6 +66,7 @@ The stable commands are:
 ```text
 ups train
 ups evaluate
+ups report
 ups collect-states
 ups extract-updates
 ups align
@@ -65,7 +87,8 @@ JSON/Markdown.
 
 - Gate thresholds live in `configs/phase0.yaml` and are immutable inputs.
 - Missing, stale, incomplete, or non-finite evidence fails closed.
-- The gate requires four tasks by three seeds, 200 evaluation episodes per policy,
+- The confirmatory study requires six tasks by five shared seeds (30 policies),
+  200 evaluation episodes per policy,
   the 512 by 32 common replay buffer, and 1,000 null replicates.
 - CNN/MLP permutations compensate adjacent layers and are function-tested.
 - GRU symmetry is explicitly unresolved; recurrent comparisons are invariant

@@ -23,6 +23,38 @@ def success_from_info(info: dict[str, Any]) -> bool:
     return getattr(status, "name", str(status)) == "TASK_SUCCESSFUL"
 
 
+def _jsonable(value: Any) -> Any:
+    """Convert Gym/Numpy observations into a deterministic JSON value."""
+    if isinstance(value, dict):
+        return {str(key): _jsonable(item) for key, item in value.items()}
+    if isinstance(value, (list, tuple)):
+        return [_jsonable(item) for item in value]
+    if hasattr(value, "tolist"):
+        return _jsonable(value.tolist())
+    if hasattr(value, "item"):
+        return value.item()
+    if isinstance(value, (str, int, float, bool)) or value is None:
+        return value
+    return str(value)
+
+
+def _policy_observation(observation: dict[str, Any]) -> dict[str, Any]:
+    """Retain the exact observation fields consumed by the registered encoder."""
+    required = ("glyphs_crop", "blstats")
+    missing = [key for key in required if key not in observation]
+    if missing:
+        raise ValueError(f"policy observation is missing fields: {missing}")
+    return {key: _jsonable(observation[key]) for key in required}
+
+
+def _nethack_markers(observation: dict[str, Any]) -> tuple[int, int]:
+    """Return native NLE score and dungeon depth from a NetHack observation."""
+    from nle import nethack
+
+    blstats = observation["blstats"]
+    return int(blstats[nethack.NLE_BL_SCORE]), int(blstats[nethack.NLE_BL_DEPTH])
+
+
 def parser() -> argparse.ArgumentParser:
     command = argparse.ArgumentParser(description=__doc__)
     command.add_argument("--checkpoint", type=Path, required=True)
@@ -69,9 +101,14 @@ def evaluate(args: argparse.Namespace) -> Path:
     for episode in range(args.episodes):
         seed = args.eval_seed + episode
         observation, _ = env.reset(seed=seed)
+        nethack_score, nethack_depth = (
+            _nethack_markers(observation) if args.environment == "NetHackScore-v0" else (None, None)
+        )
+        max_nethack_depth = nethack_depth
         state = torch.zeros(1, 256)
         total_return = 0.0
         steps = 0
+        trajectory: list[dict[str, Any]] = []
         terminated = truncated = False
         while not terminated and not truncated:
             tensors = {
@@ -81,31 +118,57 @@ def evaluate(args: argparse.Namespace) -> Path:
                 output = model(tensors, state)
             action = int(output["action_logits"].argmax(dim=-1).item())
             state = output["new_rnn_states"]
+            current_observation = observation
             observation, reward, terminated, truncated, info = env.step(action)
+            if args.environment == "NetHackScore-v0":
+                nethack_score, nethack_depth = _nethack_markers(observation)
+                max_nethack_depth = max(int(max_nethack_depth), nethack_depth)
+            trajectory.append(
+                {
+                    "observation": _policy_observation(current_observation),
+                    "action": action,
+                    "reward": float(reward),
+                    "next_observation": _policy_observation(observation),
+                    "info": _jsonable(info),
+                    "terminated": bool(terminated),
+                    "truncated": bool(truncated),
+                }
+            )
             total_return += float(reward)
             steps += 1
             if args.max_episode_steps is not None and steps >= args.max_episode_steps:
                 truncated = True
-        rows.append(
-            {
-                "environment": args.environment,
-                "experiment": args.experiment,
-                "checkpoint": str(args.checkpoint),
-                "checkpoint_sha256": sha256_file(args.checkpoint),
-                "episode": episode,
-                "seed": seed,
-                "success": success_from_info(info),
-                "return": total_return,
-                "steps": steps,
-                "terminated": terminated,
-                "truncated": truncated,
-            }
-        )
+        row: dict[str, Any] = {
+            "environment": args.environment,
+            "experiment": args.experiment,
+            "checkpoint": str(args.checkpoint),
+            "checkpoint_sha256": sha256_file(args.checkpoint),
+            "episode": episode,
+            "seed": seed,
+            "success": success_from_info(info),
+            "return": total_return,
+            "steps": steps,
+            "terminated": terminated,
+            "truncated": truncated,
+            # Keep every transition, including observations, actions,
+            # rewards, and termination flags; this is the scientific raw
+            # trajectory, not merely a per-episode summary.
+            "trajectory": json.dumps(trajectory, sort_keys=True, separators=(",", ":")),
+        }
+        if args.environment == "NetHackScore-v0":
+            row.update(
+                {
+                    "final_nethack_score": nethack_score,
+                    "max_dungeon_depth": max_nethack_depth,
+                }
+            )
+        rows.append(row)
     env.close()
     output_root = args.artifact_root / "evaluations"
     output_root.mkdir(parents=True, exist_ok=True)
     table_path = output_root / f"{args.experiment}.parquet"
-    pd.DataFrame(rows).to_parquet(table_path, index=False)
+    table = pd.DataFrame(rows)
+    table.to_parquet(table_path, index=False)
     summary_path = output_root / f"{args.experiment}.json"
     atomic_json(
         summary_path,
@@ -116,10 +179,21 @@ def evaluate(args: argparse.Namespace) -> Path:
             "checkpoint_sha256": sha256_file(args.checkpoint),
             "episodes": args.episodes,
             "eval_seed": args.eval_seed,
+            "action_selection": "greedy_argmax",
             "max_episode_steps": args.max_episode_steps,
-            "success_rate": float(pd.DataFrame(rows)["success"].mean()),
-            "median_return": float(pd.DataFrame(rows)["return"].median()),
+            "success_rate": float(table["success"].mean()),
+            "mean_return": float(table["return"].mean()),
+            "median_return": float(table["return"].median()),
+            "mean_length": float(table["steps"].mean()),
             "table": str(table_path),
+            **(
+                {
+                    "mean_final_nethack_score": float(table["final_nethack_score"].mean()),
+                    "mean_max_dungeon_depth": float(table["max_dungeon_depth"].mean()),
+                }
+                if args.environment == "NetHackScore-v0"
+                else {}
+            ),
         },
     )
     return summary_path

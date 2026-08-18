@@ -30,9 +30,13 @@ from ups.lora import compose_lora, merged_equivalent, rotate_factors
 from ups.metrics import action_agreement, action_kl, linear_cka, normalized_value_rmse
 from ups.model import RecurrentNLEPolicy
 from ups.nulls import gaussian_norm_matched, spectrum_matched_orientation
+from ups.statistics import (
+    aggregate_learning_curves,
+    aggregate_seed_results,
+    bootstrap_power_diagnostic,
+    write_statistics_report,
+)
 from ups.subspace import fit_svd, hosvd, hosvd_reconstruct
-
-STABLE_COMPETENCE_EVALUATIONS = 2
 
 
 def stage_path(config: Phase0Config, name: str) -> Path:
@@ -107,6 +111,12 @@ def train(
             experiment,
             "--max-steps",
             str(config.training.max_environment_steps),
+            "--checkpoint-retention",
+            str(config.training.checkpoint_retention),
+            "--checkpoint-save-interval-seconds",
+            str(config.training.checkpoint_save_interval_seconds),
+            "--heartbeat-reporting-interval-seconds",
+            str(config.training.heartbeat_reporting_interval_seconds),
             "--smoke",
         ]
         if resume:
@@ -150,8 +160,23 @@ def train(
     )
 
 
+def _primary_metric(config: Phase0Config) -> str:
+    """Return the preregistered outcome appropriate to this study cohort."""
+    # NetHackScore has no MiniHack-style TASK_SUCCESSFUL endpoint.  Its native
+    # NLE score return is the benchmark outcome; treating every score episode
+    # as a binary failure would manufacture a meaningless competence result.
+    return "return" if config.study == "nethack-baseline" else "success"
+
+
+def _qualification(summary: dict[str, Any], config: Phase0Config) -> bool | None:
+    """Apply a binary competence rule only where such a rule is defined."""
+    if _primary_metric(config) != "success":
+        return None
+    return bool(summary["success_rate"] >= config.training.minimum_success)
+
+
 def population_jobs(config: Phase0Config) -> list[dict[str, Any]]:
-    """Create the immutable, duplicate-free 4-task x 3-seed job registry."""
+    """Create the immutable, duplicate-free task-by-seed job registry."""
     jobs: list[dict[str, Any]] = []
     for environment in config.environments:
         for seed in config.seeds:
@@ -165,11 +190,28 @@ def population_jobs(config: Phase0Config) -> list[dict[str, Any]]:
                     "evaluation_interval": config.training.evaluation_interval,
                     "evaluation_episodes": config.training.evaluation_episodes,
                     "minimum_success": config.training.minimum_success,
+                    "primary_metric": _primary_metric(config),
                     "cohort": "independent_initialization",
                     "base_checkpoint": None,
                 }
             )
     return jobs
+
+
+def _upsert_population_job(
+    job_records: list[dict[str, Any]],
+    job: dict[str, Any],
+    checkpoints: list[dict[str, Any]],
+    stop_reason: str | None = None,
+) -> list[dict[str, Any]]:
+    """Replace one task/seed record without ever changing a peer's checkpoints."""
+    key = (job["environment"], job["seed"])
+    replacement: dict[str, Any] = {**job, "checkpoints": checkpoints}
+    if stop_reason is not None:
+        replacement["stop_reason"] = stop_reason
+    return [
+        record for record in job_records if (record.get("environment"), record.get("seed")) != key
+    ] + [replacement]
 
 
 def _fixed_evaluation_command(
@@ -230,9 +272,19 @@ def _evaluate_population_checkpoint(
         "table": summary.get("table"),
         "episodes": summary["episodes"],
         "eval_seed": summary.get("eval_seed"),
+        "action_selection": summary["action_selection"],
         "success_rate": summary["success_rate"],
+        "mean_return": summary["mean_return"],
         "median_return": summary["median_return"],
-        "qualified": summary["success_rate"] >= config.training.minimum_success,
+        "mean_length": summary["mean_length"],
+        "mean_max_dungeon_depth": summary.get("mean_max_dungeon_depth"),
+        "primary_metric": _primary_metric(config),
+        "primary_metric_value": (
+            summary["mean_return"]
+            if _primary_metric(config) == "return"
+            else summary["success_rate"]
+        ),
+        "qualified": _qualification(summary, config),
     }
 
 
@@ -245,7 +297,13 @@ def checkpoint_environment_steps(checkpoint: Path) -> int:
 
 
 def _population_stop_reason(config: Phase0Config, checkpoints: list[dict[str, Any]]) -> str | None:
-    """Return the auditable preregistered endpoint for a policy training run."""
+    """Return the endpoint only after the preregistered budget is complete.
+
+    Qualification during training is descriptive evidence, never a stopping
+    rule.  Stopping on a favorable held-out evaluation would turn the fixed
+    evaluation buffer into a selection device and violate the confirmatory
+    protocol.
+    """
     if not checkpoints:
         return None
     targets = [record.get("target_environment_steps") for record in checkpoints]
@@ -253,14 +311,6 @@ def _population_stop_reason(config: Phase0Config, checkpoints: list[dict[str, An
         isinstance(record.get("evaluation"), dict) for record in checkpoints
     ):
         return "MAX_ENVIRONMENT_STEPS"
-    recent = checkpoints[-STABLE_COMPETENCE_EVALUATIONS:]
-    if len(recent) != STABLE_COMPETENCE_EVALUATIONS:
-        return None
-    if all(
-        isinstance(record.get("evaluation"), dict) and record["evaluation"].get("qualified") is True
-        for record in recent
-    ):
-        return "STABLE_COMPETENCE"
     return None
 
 
@@ -326,8 +376,8 @@ def launch_population(
         checkpoints = list(prior.get((job["environment"], job["seed"]), {}).get("checkpoints", []))
         stop_reason: str | None = _population_stop_reason(config, checkpoints)
         for target in range(interval, config.training.max_environment_steps + interval, interval):
-            if stop_reason is not None:
-                break
+            # Do not early-stop on evaluation performance.  Every configured
+            # checkpoint through max_environment_steps is retained/evaluated.
             existing = next(
                 (
                     record
@@ -341,13 +391,12 @@ def launch_population(
             if existing is not None:
                 if not isinstance(existing.get("evaluation"), dict):
                     existing["evaluation"] = _evaluate_population_checkpoint(config, job, existing)
-                    job_records = [
-                        {**prior_job, "checkpoints": checkpoints}
-                        if (prior_job["environment"], prior_job["seed"])
-                        == (job["environment"], job["seed"])
-                        else prior_job
-                        for prior_job in job_records
-                    ]
+                    job_records = _upsert_population_job(
+                        job_records,
+                        job,
+                        checkpoints,
+                        stop_reason,
+                    )
                     atomic_json(
                         report,
                         {
@@ -373,6 +422,12 @@ def launch_population(
                 job["experiment"],
                 "--max-steps",
                 str(target),
+                "--checkpoint-retention",
+                str(config.training.checkpoint_retention),
+                "--checkpoint-save-interval-seconds",
+                str(config.training.checkpoint_save_interval_seconds),
+                "--heartbeat-reporting-interval-seconds",
+                str(config.training.heartbeat_reporting_interval_seconds),
             ]
             if target > interval or experiment_root.is_dir():
                 command.append("--resume")
@@ -397,12 +452,7 @@ def launch_population(
                 "evaluation": "AWAITING_FIXED_EPISODE_EVALUATION",
             }
             checkpoints.append(checkpoint_record)
-            job_records = [
-                {**existing, "checkpoints": checkpoints}
-                for existing in job_records
-                if (existing["environment"], existing["seed"]) != (job["environment"], job["seed"])
-            ]
-            job_records.append({**job, "checkpoints": checkpoints})
+            job_records = _upsert_population_job(job_records, job, checkpoints)
             atomic_json(
                 report,
                 {
@@ -416,16 +466,7 @@ def launch_population(
                 config, job, checkpoint_record
             )
             stop_reason = _population_stop_reason(config, checkpoints)
-            job_records = [
-                {
-                    **existing,
-                    "checkpoints": checkpoints,
-                    "stop_reason": stop_reason,
-                }
-                if (existing["environment"], existing["seed"]) == (job["environment"], job["seed"])
-                else existing
-                for existing in job_records
-            ]
+            job_records = _upsert_population_job(job_records, job, checkpoints, stop_reason)
             atomic_json(
                 report,
                 {
@@ -435,12 +476,7 @@ def launch_population(
                     "qualified_population": False,
                 },
             )
-        job_records = [
-            record
-            for record in job_records
-            if (record["environment"], record["seed"]) != (job["environment"], job["seed"])
-        ]
-        job_records.append({**job, "checkpoints": checkpoints, "stop_reason": stop_reason})
+        job_records = _upsert_population_job(job_records, job, checkpoints, stop_reason)
     atomic_json(
         report,
         {
@@ -510,11 +546,21 @@ def evaluate(config: Phase0Config) -> Path:
                     **job,
                     **checkpoint_record,
                     "success_rate": summary["success_rate"],
+                    "mean_return": summary["mean_return"],
                     "median_return": summary["median_return"],
+                    "mean_length": summary["mean_length"],
+                    "mean_max_dungeon_depth": summary.get("mean_max_dungeon_depth"),
+                    "action_selection": summary["action_selection"],
                     "episodes": summary.get("episodes"),
                     "evaluation_table": summary.get("table"),
                     "max_episode_steps": summary.get("max_episode_steps"),
-                    "qualified": summary["success_rate"] >= config.training.minimum_success,
+                    "primary_metric": _primary_metric(config),
+                    "primary_metric_value": (
+                        summary["mean_return"]
+                        if _primary_metric(config) == "return"
+                        else summary["success_rate"]
+                    ),
+                    "qualified": _qualification(summary, config),
                 }
             )
     table_path = config.artifact_root / "evaluations" / "policy_registry.parquet"
@@ -527,11 +573,20 @@ def evaluate(config: Phase0Config) -> Path:
     ]
     final_pairs = {(row["environment"], row["seed"]) for row in final_summaries}
     expected_pairs = {(job["environment"], job["seed"]) for job in population_jobs(config)}
-    qualified_final = (
+    population_complete = (
         bool(final_summaries)
         and len(final_pairs) == len(expected_pairs)
         and final_pairs == expected_pairs
-        and all(row["qualified"] for row in final_summaries)
+    )
+    qualified_final = population_complete and (
+        _primary_metric(config) != "success" or all(row["qualified"] for row in final_summaries)
+    )
+    evaluation_status = (
+        "QUALIFIED"
+        if _primary_metric(config) == "success" and qualified_final
+        else "COMPLETE_BASELINE"
+        if _primary_metric(config) == "return" and population_complete
+        else "EVALUATED_UNQUALIFIED"
     )
     atomic_json(
         evaluation_report,
@@ -540,7 +595,11 @@ def evaluate(config: Phase0Config) -> Path:
             "episodes_per_checkpoint": config.training.evaluation_episodes,
             "fixed_eval_seeds": fixed_seeds,
             "records": len(summaries),
-            "qualified_population": qualified_final,
+            "primary_metric": _primary_metric(config),
+            "population_complete": population_complete,
+            "qualified_population": qualified_final
+            if _primary_metric(config) == "success"
+            else None,
             "policy_registry": str(table_path),
         },
     )
@@ -548,11 +607,159 @@ def evaluate(config: Phase0Config) -> Path:
         config,
         "evaluate",
         {
-            "status": "QUALIFIED" if qualified_final else "EVALUATED_UNQUALIFIED",
+            "status": evaluation_status,
             "checkpoint": str(config.artifact_root / "evaluations"),
             "evaluation_report": str(evaluation_report),
-            "qualified_population": qualified_final,
+            "qualified_population": qualified_final
+            if _primary_metric(config) == "success"
+            else None,
         },
+    )
+
+
+def report(
+    config: Phase0Config,
+    minimum_lift: float | None = None,
+    bootstrap_seed: int = 0,
+) -> Path:
+    """Aggregate completed registry results by environment and training seed."""
+    registry_path = config.artifact_root / "evaluations" / "policy_registry.parquet"
+    if not registry_path.is_file():
+        return record_stage(config, "report", {"status": "AWAITING_EVALUATION_REGISTRY"})
+    evaluation_report_path = config.artifact_root / "evaluations" / "evaluation_report.json"
+    if not evaluation_report_path.is_file():
+        raise ValueError("statistics report requires the linked evaluation report")
+    try:
+        evaluation_report = json.loads(evaluation_report_path.read_text(encoding="utf-8"))
+    except (OSError, json.JSONDecodeError) as error:
+        raise ValueError(f"invalid evaluation report: {error}") from error
+    if evaluation_report.get("config_hash") != config.digest:
+        raise ValueError("statistics report refuses a stale evaluation registry")
+    if evaluation_report.get("policy_registry") != str(registry_path):
+        raise ValueError("evaluation report does not link the expected policy registry")
+    if evaluation_report.get("episodes_per_checkpoint") != config.training.evaluation_episodes:
+        raise ValueError("evaluation report has the wrong fixed episode count")
+    registry = pd.read_parquet(registry_path)
+    primary_metric = _primary_metric(config)
+    primary_column = "success_rate" if primary_metric == "success" else "mean_return"
+    required = {"environment", "seed", "target_environment_steps", primary_column}
+    missing = required.difference(registry.columns)
+    if missing:
+        raise ValueError(f"evaluation registry missing columns: {sorted(missing)}")
+    # The registry is policy/checkpoint-level metadata.  Report episode-level
+    # metrics at seed granularity; never treat the fixed evaluation episodes as
+    # independent training replicates.  These means are written by the pinned
+    # evaluator and are deliberately required alongside success.
+    metric_columns = {
+        "return": next((c for c in ("mean_return", "return_mean") if c in registry), None),
+        "length": next(
+            (c for c in ("mean_length", "mean_steps", "length_mean") if c in registry), None
+        ),
+    }
+    if primary_metric == "success":
+        metric_columns["success"] = "success_rate"
+    if config.study == "nethack-baseline":
+        metric_columns["max_depth"] = next(
+            (c for c in ("mean_max_dungeon_depth", "mean_depth") if c in registry), None
+        )
+    missing_metrics = [name for name, column in metric_columns.items() if column is None]
+    if missing_metrics:
+        raise ValueError(
+            "evaluation registry missing required report metrics: " + ", ".join(missing_metrics)
+        )
+    records = registry[
+        ["environment", "seed", "target_environment_steps", *metric_columns.values()]
+    ].copy()
+    records = records.rename(columns={"target_environment_steps": "checkpoint"})
+    records["seed"] = records["seed"].astype(int)
+    if set(records["seed"]) != set(config.seeds):
+        raise ValueError(f"report requires all configured seeds {config.seeds}")
+    if set(records["environment"]) != set(config.environments):
+        raise ValueError("report requires every configured environment")
+    # Every environment must expose the same checkpoint grid.  An intersection
+    # would silently discard stale/incomplete checkpoints, so reject anything
+    # that is not exactly common across environments.
+    checkpoint_sets = [
+        set(records.loc[records["environment"] == env, "checkpoint"]) for env in config.environments
+    ]
+    expected_checkpoints = set(
+        range(
+            config.training.evaluation_interval,
+            config.training.max_environment_steps + config.training.evaluation_interval,
+            config.training.evaluation_interval,
+        )
+    )
+    if any(checkpoints != expected_checkpoints for checkpoints in checkpoint_sets):
+        raise ValueError(
+            "evaluation registry does not contain the complete configured checkpoint grid"
+        )
+    curves: list[pd.DataFrame] = []
+    long_records: list[pd.DataFrame] = []
+    for metric, column in metric_columns.items():
+        metric_records = records[["environment", "seed", "checkpoint", column]].rename(
+            columns={column: "value"}
+        )
+        long_records.append(metric_records.assign(metric=metric))
+        curves.append(
+            aggregate_learning_curves(
+                metric_records,
+                checkpoints=sorted(expected_checkpoints),
+                expected_environments=config.environments,
+                expected_seeds=config.seeds,
+                bootstrap_replicates=config.analysis.bootstrap_replicates,
+                bootstrap_seed=bootstrap_seed,
+            ).assign(metric=metric)
+        )
+    final_checkpoint = max(records["checkpoint"])
+    final = records[records["checkpoint"] == final_checkpoint]
+    summary_rows: list[pd.DataFrame] = []
+    for metric, column in metric_columns.items():
+        metric_final = final[["environment", "seed", column]].rename(columns={column: "value"})
+        summary_rows.append(
+            aggregate_seed_results(
+                metric_final,
+                expected_environments=config.environments,
+                expected_seeds=config.seeds,
+                bootstrap_replicates=config.analysis.bootstrap_replicates,
+                bootstrap_seed=bootstrap_seed,
+            ).assign(metric=metric)
+        )
+    summaries = pd.concat(summary_rows, ignore_index=True)
+    first_checkpoint = min(records["checkpoint"])
+    effect_size = config.analysis.practical_effect_size if minimum_lift is None else minimum_lift
+    power: dict[str, Any] = {
+        "contrast": f"{primary_metric} at first versus final configured checkpoint",
+        "minimum_lift": effect_size,
+        "baseline_checkpoint": first_checkpoint,
+        "treatment_checkpoint": final_checkpoint,
+        "by_environment": {},
+    }
+    for environment in config.environments:
+        baseline = records[
+            (records["environment"] == environment) & (records["checkpoint"] == first_checkpoint)
+        ][metric_columns[primary_metric]]
+        treatment = records[
+            (records["environment"] == environment) & (records["checkpoint"] == final_checkpoint)
+        ][metric_columns[primary_metric]]
+        power["by_environment"][environment] = bootstrap_power_diagnostic(
+            baseline.to_numpy(float),
+            treatment.to_numpy(float),
+            minimum_lift=effect_size,
+            bootstrap_replicates=config.analysis.bootstrap_replicates,
+            bootstrap_seed=bootstrap_seed,
+        )
+    output_prefix = config.artifact_root / "statistics" / "seed_report"
+    outputs = write_statistics_report(
+        summaries,
+        output_prefix,
+        learning_curves=pd.concat(curves, ignore_index=True),
+        power=power,
+        individual_results=pd.concat(long_records, ignore_index=True),
+    )
+    return record_stage(
+        config,
+        "report",
+        {"status": "COMPLETE", "primary_metric": primary_metric, "outputs": outputs},
     )
 
 
@@ -622,16 +829,10 @@ def _retained_checkpoint_records(
         record = checkpoints[-1]
         terminal_target = record.get("target_environment_steps")
         if terminal_target != config.training.max_environment_steps:
-            recent = checkpoints[-STABLE_COMPETENCE_EVALUATIONS:]
-            if len(recent) != STABLE_COMPETENCE_EVALUATIONS or not all(
-                isinstance(candidate.get("evaluation"), dict)
-                and candidate["evaluation"].get("qualified") is True
-                for candidate in recent
-            ):
-                raise ValueError(
-                    "early-stopped policy lacks two consecutive qualifying evaluations for "
-                    f"{environment}:seed{seed}"
-                )
+            raise ValueError(
+                "policy is not trained through the preregistered maximum budget for "
+                f"{environment}:seed{seed}"
+            )
         checkpoint = Path(record.get("checkpoint", ""))
         digest = record.get("checkpoint_sha256")
         if (

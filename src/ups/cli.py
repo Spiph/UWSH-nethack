@@ -15,6 +15,7 @@ from ups.workflow import evaluate as run_evaluate
 from ups.workflow import extract_updates as run_extract_updates
 from ups.workflow import gate as run_gate
 from ups.workflow import record_stage
+from ups.workflow import report as run_report
 from ups.workflow import reproduce as run_reproduce
 from ups.workflow import train as run_train
 
@@ -60,6 +61,22 @@ def train(
 def evaluate(config: Path = typer.Option(config_option(), exists=True)) -> None:
     cfg = load_config(config)
     typer.echo(run_evaluate(cfg))
+
+
+@app.command()
+def report(
+    config: Path = typer.Option(config_option(), exists=True),
+    minimum_lift: float | None = typer.Option(
+        None,
+        min=1e-12,
+        help="Optional exploratory override of the preregistered practical effect size.",
+    ),
+    bootstrap_seed: int = typer.Option(
+        0, min=0, help="Seed for deterministic bootstrap resampling."
+    ),
+) -> None:
+    """Aggregate all configured environment/seed evaluation results."""
+    typer.echo(run_report(load_config(config), minimum_lift, bootstrap_seed))
 
 
 @app.command("check")

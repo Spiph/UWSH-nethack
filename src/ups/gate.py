@@ -50,9 +50,11 @@ REQUIRED_GEOMETRY_METRICS = (
     "subspace_stability",
 )
 
-# Hash of configs/phase0.yaml as preregistered before any evidence was generated.
+# Hash of revision 2 of the expanded config (6 environments x 5 independent
+# training seeds 10--14, disjoint from the inspected pilot). Revision 1 is
+# retained as an excluded incident because it did not preserve every checkpoint.
 PREREGISTERED_PHASE0_CONFIG_HASH = (
-    "c2b9d27a22274e5b59c41ad35a4ab9269aefa130f7c603fd11c9e4015b276bb2"
+    "e6a24efeb1d001d7a45e41de7c46b4bef51881f316e27e6b5e79618c0c2b428d"
 )
 ARTIFACT_VERIFIER_IMPLEMENTED = True
 
@@ -124,7 +126,7 @@ def evaluate_gate(config: Phase0Config, evidence: dict[str, Any]) -> dict[str, A
             "full_population",
             bool(completeness.get("full_population")),
             completeness,
-            "4 tasks x 3 seeds",
+            f"{len(config.environments)} tasks x {len(config.seeds)} seeds",
         ),
         Check(
             "policy_quality",

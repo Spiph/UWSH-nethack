@@ -26,7 +26,10 @@ services:
 
   tensorboard:
     image: tensorflow/tensorflow:2.16.1
-    command: tensorboard --logdir=/artifacts/tensorboard --host=0.0.0.0
+    # Sample Factory writes live scalar event files under each experiment's
+    # `.summary/0` directory. Point TensorBoard at the active confirmatory
+    # population root rather than the unused legacy tensorboard directory.
+    command: tensorboard --logdir=/artifacts/phase0-confirmatory-r2/sample_factory --host=0.0.0.0 --port=6006
     ports:
       - "6006:6006"
     volumes:

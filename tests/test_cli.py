@@ -17,6 +17,7 @@ def test_all_cli_commands(tmp_path: Path) -> None:
     commands = [
         ["train", "--config", str(config), "--reduced"],
         ["evaluate", "--config", str(config)],
+        ["report", "--config", str(config)],
         ["collect-states", "--config", str(config), "--reduced"],
         ["extract-updates", "--config", str(config)],
         ["align", "--config", str(config)],
@@ -35,3 +36,4 @@ def test_cli_help() -> None:
     result = CliRunner().invoke(app, ["--help"])
     assert result.exit_code == 0
     assert "collect-states" in result.output
+    assert "report" in result.output

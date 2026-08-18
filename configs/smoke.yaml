@@ -10,6 +10,9 @@ training:
   evaluation_interval: 64
   evaluation_episodes: 2
   minimum_success: 0.75
+  checkpoint_retention: 32
+  checkpoint_save_interval_seconds: 3600
+  heartbeat_reporting_interval_seconds: 3600
 evaluation_buffer:
   sequences: 8
   sequence_length: 4
@@ -19,6 +22,7 @@ analysis:
   explained_variance: 0.95
   null_replicates: 8
   bootstrap_replicates: 32
+  practical_effect_size: 0.05
   leave_one_task_out: true
 adapters:
   repositories: []

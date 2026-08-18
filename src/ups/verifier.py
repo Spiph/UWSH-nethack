@@ -107,21 +107,11 @@ def _population_checks(config: Phase0Config) -> tuple[bool, list[str]]:
                     for checkpoint in checkpoints
                     if isinstance(checkpoint, dict)
                 ]
-                if not targets or targets != expected_targets[: len(targets)]:
+                if targets != expected_targets:
                     training_failures.append(
-                        "training report does not contain a configured checkpoint schedule prefix"
+                        "training report does not contain the complete configured "
+                        "checkpoint schedule"
                     )
-                elif targets[-1] != config.training.max_environment_steps:
-                    recent = checkpoints[-2:]
-                    if len(recent) != 2 or not all(
-                        isinstance(record, dict)
-                        and isinstance(record.get("evaluation"), dict)
-                        and record["evaluation"].get("qualified") is True
-                        for record in recent
-                    ):
-                        training_failures.append(
-                            "early-stopped policy lacks two consecutive qualifying evaluations"
-                        )
                 for checkpoint in checkpoints:
                     if not isinstance(checkpoint, dict):
                         training_failures.append("invalid checkpoint record")
@@ -199,7 +189,10 @@ def _evaluation_checks(config: Phase0Config) -> tuple[bool, list[str]]:
         "checkpoint",
         "checkpoint_sha256",
         "success_rate",
+        "mean_return",
         "median_return",
+        "mean_length",
+        "action_selection",
         "episodes",
         "evaluation_table",
         "max_episode_steps",
@@ -208,6 +201,24 @@ def _evaluation_checks(config: Phase0Config) -> tuple[bool, list[str]]:
         failures.append("evaluation registry is missing required columns")
         return False, failures
     expected = {(environment, seed) for environment in config.environments for seed in config.seeds}
+    expected_targets = range(
+        config.training.evaluation_interval,
+        config.training.max_environment_steps + config.training.evaluation_interval,
+        config.training.evaluation_interval,
+    )
+    expected_records = {
+        (environment, seed, target) for environment, seed in expected for target in expected_targets
+    }
+    observed_records = set(
+        zip(
+            table["environment"],
+            table["seed"],
+            table["target_environment_steps"],
+            strict=False,
+        )
+    )
+    if observed_records != expected_records or len(table) != len(expected_records):
+        failures.append("evaluation registry checkpoint schedule is incomplete or duplicated")
     fixed_seeds = dict(zip(config.environments, config.evaluation_buffer.fixed_seeds, strict=True))
     final = table[table["target_environment_steps"] == config.training.max_environment_steps]
     observed = set(zip(final["environment"], final["seed"], strict=False))
@@ -222,7 +233,9 @@ def _evaluation_checks(config: Phase0Config) -> tuple[bool, list[str]]:
         raw_table = row["evaluation_table"]
         episodes = row["episodes"]
         declared_rate = row["success_rate"]
+        declared_mean = row["mean_return"]
         declared_median = row["median_return"]
+        declared_length = row["mean_length"]
         linked = training_map.get(
             (row["environment"], row["seed"], row["target_environment_steps"])
         )
@@ -261,8 +274,10 @@ def _evaluation_checks(config: Phase0Config) -> tuple[bool, list[str]]:
             "seed",
             "success",
             "return",
+            "steps",
             "terminated",
             "truncated",
+            "trajectory",
         }
         if not required_raw.issubset(raw.columns):
             failures.append(f"raw evaluation table is missing required columns: {raw_path}")
@@ -302,12 +317,75 @@ def _evaluation_checks(config: Phase0Config) -> tuple[bool, list[str]]:
             )
         if not is_bool_dtype(raw["terminated"]) or not is_bool_dtype(raw["truncated"]):
             failures.append(f"raw evaluation table has invalid termination fields: {raw_path}")
+        if row["action_selection"] != "greedy_argmax":
+            failures.append(f"evaluation action-selection rule is not preregistered: {raw_path}")
+        for row_index, trajectory in enumerate(raw["trajectory"]):
+            try:
+                parsed = json.loads(trajectory) if isinstance(trajectory, str) else None
+            except (TypeError, json.JSONDecodeError):
+                parsed = None
+            if not isinstance(parsed, list) or not parsed:
+                failures.append(
+                    f"raw evaluation table has missing/invalid full trajectory: {raw_path}"
+                )
+                break
+            if any(
+                not isinstance(step, dict)
+                or not {
+                    "observation",
+                    "action",
+                    "reward",
+                    "next_observation",
+                    "info",
+                    "terminated",
+                    "truncated",
+                }.issubset(step)
+                for step in parsed
+            ):
+                failures.append(
+                    f"raw evaluation trajectory is missing transition fields: {raw_path}"
+                )
+                break
+            invalid_transition = any(
+                not isinstance(step["observation"], dict)
+                or not {"glyphs_crop", "blstats"}.issubset(step["observation"])
+                or not isinstance(step["next_observation"], dict)
+                or not {"glyphs_crop", "blstats"}.issubset(step["next_observation"])
+                or isinstance(step["action"], bool)
+                or not isinstance(step["action"], int)
+                or not 0 <= step["action"] < 8
+                or isinstance(step["reward"], bool)
+                or not isinstance(step["reward"], (int, float))
+                or not isfinite(float(step["reward"]))
+                or not isinstance(step["info"], dict)
+                or not isinstance(step["terminated"], bool)
+                or not isinstance(step["truncated"], bool)
+                for step in parsed
+            )
+            if invalid_transition:
+                failures.append(f"raw evaluation trajectory has invalid transitions: {raw_path}")
+                break
+            # The retained transition count must agree with the episode
+            # summary, preventing a truncated/raw mismatch from passing.
+            episode_steps = raw.iloc[row_index]["steps"]
+            try:
+                finite_steps = isfinite(float(episode_steps))
+                integral_steps = float(episode_steps).is_integer()
+            except (TypeError, ValueError):
+                finite_steps = integral_steps = False
+            if not finite_steps or not integral_steps or len(parsed) != int(episode_steps):
+                failures.append(f"raw evaluation trajectory length mismatch: {raw_path}")
+                break
         if is_bool_dtype(successes) and is_numeric_dtype(returns):
             recomputed_rate = float(successes.mean())
             if abs(recomputed_rate - float(declared_rate)) > 1e-12:
                 failures.append(f"success-rate summary does not match raw table: {raw_path}")
+            if abs(float(returns.mean()) - float(declared_mean)) > 1e-12:
+                failures.append(f"mean-return summary does not match raw table: {raw_path}")
             if abs(float(returns.median()) - float(declared_median)) > 1e-12:
                 failures.append(f"median-return summary does not match raw table: {raw_path}")
+            if abs(float(raw["steps"].mean()) - float(declared_length)) > 1e-12:
+                failures.append(f"mean-length summary does not match raw table: {raw_path}")
             if (
                 row["target_environment_steps"] == config.training.max_environment_steps
                 and recomputed_rate < config.training.minimum_success
