@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
-import metaworld
+import metaworld  # noqa: F401
 import numpy as np
 import torch
 from gymnasium import ObservationWrapper
@@ -91,7 +91,9 @@ def actor_vector(actor: torch.nn.Module) -> tuple[np.ndarray, list[dict[str, Any
     return np.concatenate(pieces), layout
 
 
-def load_actor_vector(actor: torch.nn.Module, vector: np.ndarray, layout: list[dict[str, Any]]) -> None:
+def load_actor_vector(
+    actor: torch.nn.Module, vector: np.ndarray, layout: list[dict[str, Any]]
+) -> None:
     parameters = dict(actor.named_parameters())
     with torch.no_grad():
         for item in layout:
@@ -195,9 +197,7 @@ def eval_model(
                         "policy_id": policy_id,
                         "condition": condition,
                         "replicate": replicate,
-                        "training_task": next(
-                            (t for t in TASKS if f"__{t}__" in policy_id), ""
-                        ),
+                        "training_task": next((t for t in TASKS if f"__{t}__" in policy_id), ""),
                         "evaluation_task": task,
                         "policy_kind": kind,
                         "episode": episode,
@@ -275,9 +275,13 @@ def main() -> int:
         },
         "seed_convention": {
             "base": BASE_SEED,
-            "training_environment": "base + 100000 + replicate*1000 + task_index*10 + condition_index",
+            "training_environment": (
+                "base + 100000 + replicate*1000 + task_index*10 + condition_index"
+            ),
             "initial_actor_shared": "base + 10000 + replicate*100 + condition_index",
-            "initial_actor_independent": "base + 10000 + replicate*100 + task_index*10 + condition_index",
+            "initial_actor_independent": (
+                "base + 10000 + replicate*100 + task_index*10 + condition_index"
+            ),
         },
         "permutation_control_max_abs_error": None,
         "source_runs": [],
@@ -322,7 +326,9 @@ def main() -> int:
                 for task_index, task in enumerate(TASKS):
                     if time.monotonic() >= train_deadline:
                         break
-                    env_seed = BASE_SEED + 100_000 + replicate * 1_000 + task_index * 10 + condition_index
+                    env_seed = (
+                        BASE_SEED + 100_000 + replicate * 1_000 + task_index * 10 + condition_index
+                    )
                     init_seed = BASE_SEED + 10_000 + replicate * 100 + condition_index
                     if condition == "independent_init":
                         init_seed += task_index * 10
@@ -357,9 +363,17 @@ def main() -> int:
                         else:
                             model.policy.actor.load_state_dict(shared_actor_state)
                     initial_hash = hash_actor(model.policy.actor)
-                    if condition == "shared_init" and len(
-                        [r for r in manifest["source_runs"] if r["condition"] == condition and r["replicate"] == replicate]
-                    ) > 0:
+                    if (
+                        condition == "shared_init"
+                        and len(
+                            [
+                                r
+                                for r in manifest["source_runs"]
+                                if r["condition"] == condition and r["replicate"] == replicate
+                            ]
+                        )
+                        > 0
+                    ):
                         expected = next(
                             r["initial_actor_sha256"]
                             for r in manifest["source_runs"]
@@ -412,9 +426,11 @@ def main() -> int:
                     env.close()
                     del model
                     total_index += 1
+                    steps_completed = record["environment_steps_completed"]
+                    steps_per_second = record["steps_per_second"]
                     print(
-                        f"trained {total_index}/18 {ident}: {record['environment_steps_completed']} steps, "
-                        f"{record['steps_per_second']:.1f} steps/s",
+                        f"trained {total_index}/18 {ident}: {steps_completed} steps, "
+                        f"{steps_per_second:.1f} steps/s",
                         flush=True,
                     )
                     if callback.stopped_for_budget:
@@ -422,8 +438,11 @@ def main() -> int:
                 if time.monotonic() >= train_deadline:
                     break
 
-        manifest["training_complete"] = len(manifest["source_runs"]) == manifest["planned_source_runs"] and all(
-            r["environment_steps_completed"] == args.steps_per_policy for r in manifest["source_runs"]
+        manifest["training_complete"] = len(manifest["source_runs"]) == manifest[
+            "planned_source_runs"
+        ] and all(
+            r["environment_steps_completed"] == args.steps_per_policy
+            for r in manifest["source_runs"]
         )
         manifest["training_cut_short"] = not manifest["training_complete"]
         manifest["training_stopped_at_utc"] = datetime.now(timezone.utc).isoformat()
@@ -466,7 +485,9 @@ def main() -> int:
                     ]
                     if any(item is None for item in sources):
                         continue
-                    source_vectors = np.stack([item["vector"] for item in sources if item is not None])
+                    source_vectors = np.stack(
+                        [item["vector"] for item in sources if item is not None]
+                    )
                     center = source_vectors.mean(axis=0)
                     _, _, vh = np.linalg.svd(source_vectors - center, full_matrices=False)
                     learned = vh[:1]
@@ -474,14 +495,16 @@ def main() -> int:
                     if target is None:
                         continue
                     target_vector = target["vector"]
-                    rng = np.random.default_rng(BASE_SEED + 500_000 + replicate * 100 + TASKS.index(target_task))
+                    rng = np.random.default_rng(
+                        BASE_SEED + 500_000 + replicate * 100 + TASKS.index(target_task)
+                    )
                     random_basis = rng.standard_normal((1, target_vector.size))
                     random_basis /= np.linalg.norm(random_basis)
                     learned_vector = center + (target_vector - center) @ learned.T @ learned
-                    random_vector = center + (target_vector - center) @ random_basis.T @ random_basis
-                    base_error = float(
-                        np.linalg.norm(target_vector - center)
+                    random_vector = (
+                        center + (target_vector - center) @ random_basis.T @ random_basis
                     )
+                    base_error = float(np.linalg.norm(target_vector - center))
                     learned_error = float(np.linalg.norm(target_vector - learned_vector))
                     random_error = float(np.linalg.norm(target_vector - random_vector))
                     diag = {
@@ -493,7 +516,9 @@ def main() -> int:
                         "max_centered_rank": int(source_vectors.shape[0] - 1),
                         "actual_rank": int(np.linalg.matrix_rank(source_vectors - center)),
                         "target_weights_used_for_coefficients": True,
-                        "interpretation": "oracle reconstruction diagnostic only; not target adaptation",
+                        "interpretation": (
+                            "oracle reconstruction diagnostic only; not target adaptation"
+                        ),
                         "parameter_count": int(target_vector.size),
                         "center_error": base_error,
                         "learned_rank_1_error": learned_error,
@@ -501,7 +526,10 @@ def main() -> int:
                         "learned_relative_residual": learned_error / max(base_error, 1e-12),
                         "random_relative_residual": random_error / max(base_error, 1e-12),
                     }
-                    for kind, vector in (("oracle_learned_rank1", learned_vector), ("oracle_random_rank1", random_vector)):
+                    for kind, vector in (
+                        ("oracle_learned_rank1", learned_vector),
+                        ("oracle_random_rank1", random_vector),
+                    ):
                         if time.monotonic() >= deadline:
                             break
                         env = make_env(target_task, BASE_SEED + 950_000)
@@ -528,7 +556,9 @@ def main() -> int:
         manifest["elapsed_seconds"] = time.monotonic() - run_started
         manifest["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
         manifest["evaluation_complete"] = time.monotonic() < deadline
-        manifest["status"] = "COMPLETE_EXPLORATORY" if manifest["evaluation_complete"] else "STOPPED_AT_BUDGET"
+        manifest["status"] = (
+            "COMPLETE_EXPLORATORY" if manifest["evaluation_complete"] else "STOPPED_AT_BUDGET"
+        )
     except Exception as error:
         manifest["status"] = "ERROR"
         manifest["error"] = f"{type(error).__name__}: {error}"
@@ -541,7 +571,22 @@ def main() -> int:
         if torch.cuda.is_available():
             torch.cuda.empty_cache()
     atomic_json(args.output / "pilot_manifest.json", manifest)
-    print(json.dumps({k: manifest[k] for k in ("status", "elapsed_seconds", "planned_source_runs", "training_complete", "evaluation_complete", "permutation_control_max_abs_error")}, indent=2))
+    print(
+        json.dumps(
+            {
+                k: manifest[k]
+                for k in (
+                    "status",
+                    "elapsed_seconds",
+                    "planned_source_runs",
+                    "training_complete",
+                    "evaluation_complete",
+                    "permutation_control_max_abs_error",
+                )
+            },
+            indent=2,
+        )
+    )
     return 0 if manifest["status"] == "COMPLETE_EXPLORATORY" else 2
 
 
