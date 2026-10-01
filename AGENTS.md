@@ -20,4 +20,9 @@ GitHub is the canonical tracker for this repository's research planning, decisio
 - Store reproducible code/configs in commits and large artifacts in an explicitly designated location with hashes/manifests. Put durable planning and result summaries in GitHub issues, not only chat.
 - Do not launch paid services, unbudgeted training campaigns, optional Jev/curriculum work, submissions or public artifact releases without the relevant authorization.
 
+## Code quality checks
+
+- Fix actionable lint, formatting, type-check, test, and pipeline-check failures instead of ignoring or bypassing them. If a check cannot run because of an explicit resource or environment constraint, say so and run the strongest relevant local alternative.
+- Avoid linter suppressions such as `noqa` for unused imports. For intentional import side effects, make the dependency explicit in executable code (for example, call the registration function) so the import is genuinely used. Add a narrow, explained suppression only when no sound code-level fix exists.
+
 See [the GitHub research workflow](.github/RESEARCH_WORKFLOW.md) for tracker commands and reporting conventions.
