@@ -14,7 +14,7 @@ from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
-import metaworld  # noqa: F401
+import metaworld
 import numpy as np
 import torch
 from gymnasium import ObservationWrapper
@@ -62,7 +62,10 @@ class CorrectedGoalBounds(ObservationWrapper):
 def make_env(task: str, seed: int) -> gym.Env:
     if task not in TASKS:
         raise ValueError(f"unsupported task: {task}")
-    env = gym.make("Meta-World/MT1", env_name=task, disable_env_checker=True)
+    env_id = "Meta-World/MT1"
+    if env_id not in gym.registry:
+        metaworld.register_mw_envs()
+    env = gym.make(env_id, env_name=task, disable_env_checker=True)
     wrapped = CorrectedGoalBounds(env)
     wrapped.reset(seed=seed)
     return wrapped
