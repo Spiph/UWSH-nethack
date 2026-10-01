@@ -1,0 +1,36 @@
+name: Research experiment
+description: Specify a controlled experiment and its evidence gates
+title: "Experiment: "
+labels: ["experiment", "wayfinder:task"]
+body:
+  - type: markdown
+    attributes:
+      value: "Check the research map and existing issues first. Attach this issue as a native sub-issue and add native blocking dependencies after creation."
+  - type: textarea
+    id: question
+    attributes:
+      label: Scientific question and novelty
+      description: State the falsifiable question, closest prior work and what could be new.
+    validations:
+      required: true
+  - type: textarea
+    id: protocol
+    attributes:
+      label: Protocol and comparisons
+      description: Define representation, task/seed split, initialization, alignment, actor/critic scope, baselines, outcomes, uncertainty and stopping rule. Label pilot versus confirmation.
+    validations:
+      required: true
+  - type: textarea
+    id: resources
+    attributes:
+      label: Resources and prerequisites
+      description: Link blocking decisions, approved compute envelope, interaction/cost limits and dependencies. A proposed count is not authorization to launch.
+    validations:
+      required: true
+  - type: textarea
+    id: completion
+    attributes:
+      label: Completion and evidence
+      description: Specify required tests, manifests, all-run reporting, fresh evaluations and the result that changes the next decision.
+    validations:
+      required: true
