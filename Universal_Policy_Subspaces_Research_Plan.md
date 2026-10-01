@@ -1,3 +1,5 @@
+> Historical plan: active planning, decisions and experiments now live in [the GitHub research map](https://github.com/Spiph/UWSH-nethack/issues/1). The original text below is preserved as background; its broader claims and schedule are not the current execution contract.
+
 1# Universal Policy Subspaces
 
 A publication research plan for testing the Universal Weight Subspace Hypothesis in reinforcement learning
