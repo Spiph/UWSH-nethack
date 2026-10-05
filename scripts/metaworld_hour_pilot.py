@@ -10,6 +10,7 @@ import platform
 import time
 import traceback
 from datetime import datetime, timezone
+from importlib.metadata import version
 from pathlib import Path
 from typing import Any
 
@@ -21,6 +22,29 @@ from gymnasium import ObservationWrapper
 from gymnasium.spaces import Box
 from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import BaseCallback
+
+if __package__:
+    from .metaworld_geometry import (
+        actor_vector,
+        fit_centered_basis,
+        hash_actor,
+        load_actor_vector,
+        project_oracle,
+        random_orthonormal_basis,
+        verify_policy_symmetry,
+    )
+    from .metaworld_pilot_report import summarize_manifest
+else:
+    from metaworld_geometry import (
+        actor_vector,
+        fit_centered_basis,
+        hash_actor,
+        load_actor_vector,
+        project_oracle,
+        random_orthonormal_basis,
+        verify_policy_symmetry,
+    )
+    from metaworld_pilot_report import summarize_manifest
 
 TASKS = ("reach-v3", "push-v3", "pick-place-v3")
 REPLICATES = 3
@@ -69,65 +93,6 @@ def make_env(task: str, seed: int) -> gym.Env:
     wrapped = CorrectedGoalBounds(env)
     wrapped.reset(seed=seed)
     return wrapped
-
-
-def hash_actor(actor: torch.nn.Module) -> str:
-    digest = hashlib.sha256()
-    for name, parameter in actor.named_parameters():
-        digest.update(name.encode("utf-8"))
-        digest.update(parameter.detach().cpu().contiguous().numpy().tobytes())
-    return digest.hexdigest()
-
-
-def actor_vector(actor: torch.nn.Module) -> tuple[np.ndarray, list[dict[str, Any]]]:
-    pieces: list[np.ndarray] = []
-    layout: list[dict[str, Any]] = []
-    offset = 0
-    for name, parameter in actor.named_parameters():
-        array = parameter.detach().cpu().contiguous().numpy().astype(np.float64, copy=False)
-        flat = array.reshape(-1)
-        pieces.append(flat)
-        layout.append(
-            {"name": name, "shape": list(array.shape), "start": offset, "end": offset + flat.size}
-        )
-        offset += flat.size
-    return np.concatenate(pieces), layout
-
-
-def load_actor_vector(
-    actor: torch.nn.Module, vector: np.ndarray, layout: list[dict[str, Any]]
-) -> None:
-    parameters = dict(actor.named_parameters())
-    with torch.no_grad():
-        for item in layout:
-            parameter = parameters[item["name"]]
-            values = vector[item["start"] : item["end"]].reshape(item["shape"])
-            parameter.copy_(torch.as_tensor(values, device=parameter.device, dtype=parameter.dtype))
-
-
-def verify_policy_symmetry(actor: torch.nn.Module, seed: int) -> float:
-    """Check a hidden-unit permutation on the actual SB3 SAC actor before training."""
-    hidden = getattr(actor, "latent_pi", None)
-    linears = [layer for layer in hidden if isinstance(layer, torch.nn.Linear)]
-    if len(linears) < 2:
-        raise ValueError("expected at least two linear layers in the SAC actor")
-    first, second = linears[0], linears[1]
-    original = {key: value.detach().clone() for key, value in actor.state_dict().items()}
-    device = next(actor.parameters()).device
-    generator = torch.Generator(device=device).manual_seed(seed)
-    observations = torch.randn((64, actor.features_dim), generator=generator, device=device)
-    with torch.no_grad():
-        before = actor.get_action_dist_params(observations)[0].detach().clone()
-        permutation = torch.randperm(first.out_features, generator=generator, device=device)
-        first.weight.copy_(first.weight[permutation])
-        first.bias.copy_(first.bias[permutation])
-        second.weight.copy_(second.weight[:, permutation])
-        after = actor.get_action_dist_params(observations)[0]
-        error = float(torch.max(torch.abs(before - after)).item())
-        actor.load_state_dict(original)
-    if error > 1e-6:
-        raise ValueError(f"function preserving hidden permutation failed: max error={error}")
-    return error
 
 
 class DeadlineCallback(BaseCallback):
@@ -228,8 +193,12 @@ def main() -> int:
     args = parser.parse_args()
     if args.seconds > 3600 or args.seconds <= 0:
         parser.error("--seconds must be between 1 and the user's 3600 second limit")
-    if args.reserve_seconds >= args.seconds or args.steps_per_policy <= 0:
+    if not 0 < args.reserve_seconds < args.seconds or args.steps_per_policy <= 0:
         parser.error("need positive training steps and a nonzero evaluation reserve")
+    if args.evaluation_episodes <= 0:
+        parser.error("--evaluation-episodes must be positive")
+    if args.output.exists() and (not args.output.is_dir() or any(args.output.iterdir())):
+        parser.error("--output must be a new or empty directory; existing runs are preserved")
     torch.set_num_threads(4)
     args.output.mkdir(parents=True, exist_ok=True)
     run_started = time.monotonic()
@@ -244,6 +213,11 @@ def main() -> int:
     manifest: dict[str, Any] = {
         "status": "RUNNING",
         "purpose": "one-hour exploratory Meta-World feasibility pilot",
+        "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
+        "measurement_code_sha256": {
+            name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
+            for name in ("metaworld_geometry.py", "metaworld_pilot_report.py")
+        },
         "started_at_utc": datetime.now(timezone.utc).isoformat(),
         "user_wall_budget_seconds": 3600,
         "runner_budget_seconds": args.seconds,
@@ -264,10 +238,11 @@ def main() -> int:
         },
         "software": {
             "python": platform.python_version(),
+            "numpy": np.__version__,
             "gymnasium": gym.__version__,
             "mujoco": __import__("mujoco").__version__,
             "stable_baselines3": __import__("stable_baselines3").__version__,
-            "metaworld_release": "3.1.1",
+            "metaworld_release": version("metaworld"),
         },
         "observation_adapter": {
             "shape": [39],
@@ -491,22 +466,18 @@ def main() -> int:
                     source_vectors = np.stack(
                         [item["vector"] for item in sources if item is not None]
                     )
-                    center = source_vectors.mean(axis=0)
-                    _, _, vh = np.linalg.svd(source_vectors - center, full_matrices=False)
-                    learned = vh[:1]
+                    center, learned, actual_rank = fit_centered_basis(source_vectors, rank=1)
                     target = source_models.get((condition, replicate, target_task))
                     if target is None:
                         continue
                     target_vector = target["vector"]
-                    rng = np.random.default_rng(
-                        BASE_SEED + 500_000 + replicate * 100 + TASKS.index(target_task)
+                    random_basis = random_orthonormal_basis(
+                        target_vector.size,
+                        rank=1,
+                        seed=BASE_SEED + 500_000 + replicate * 100 + TASKS.index(target_task),
                     )
-                    random_basis = rng.standard_normal((1, target_vector.size))
-                    random_basis /= np.linalg.norm(random_basis)
-                    learned_vector = center + (target_vector - center) @ learned.T @ learned
-                    random_vector = (
-                        center + (target_vector - center) @ random_basis.T @ random_basis
-                    )
+                    learned_vector = project_oracle(target_vector, center, learned)
+                    random_vector = project_oracle(target_vector, center, random_basis)
                     base_error = float(np.linalg.norm(target_vector - center))
                     learned_error = float(np.linalg.norm(target_vector - learned_vector))
                     random_error = float(np.linalg.norm(target_vector - random_vector))
@@ -517,7 +488,7 @@ def main() -> int:
                         "source_tasks": [task for task in TASKS if task != target_task],
                         "n_source_policies": int(source_vectors.shape[0]),
                         "max_centered_rank": int(source_vectors.shape[0] - 1),
-                        "actual_rank": int(np.linalg.matrix_rank(source_vectors - center)),
+                        "actual_rank": actual_rank,
                         "target_weights_used_for_coefficients": True,
                         "interpretation": (
                             "oracle reconstruction diagnostic only; not target adaptation"
@@ -558,10 +529,21 @@ def main() -> int:
 
         manifest["elapsed_seconds"] = time.monotonic() - run_started
         manifest["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
-        manifest["evaluation_complete"] = time.monotonic() < deadline
-        manifest["status"] = (
-            "COMPLETE_EXPLORATORY" if manifest["evaluation_complete"] else "STOPPED_AT_BUDGET"
+        report = summarize_manifest(manifest)
+        manifest["coverage_validation"] = report["coverage"]
+        manifest["initialization_validation"] = report["initialization"]
+        manifest["evaluation_complete"] = report["coverage"]["complete"]
+        manifest["validation_complete"] = (
+            manifest["training_complete"]
+            and manifest["evaluation_complete"]
+            and report["initialization"]["valid"]
         )
+        if manifest["validation_complete"]:
+            manifest["status"] = "COMPLETE_EXPLORATORY"
+        elif time.monotonic() >= deadline:
+            manifest["status"] = "STOPPED_AT_BUDGET"
+        else:
+            manifest["status"] = "INCOMPLETE_EXPLORATORY"
     except Exception as error:
         manifest["status"] = "ERROR"
         manifest["error"] = f"{type(error).__name__}: {error}"
