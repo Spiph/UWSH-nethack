@@ -43,3 +43,20 @@ The geometry tests include a known subspace and an unseen vector in its span, an
 Interpretation depends on the information used: in-sample reconstruction checks implementation, oracle reconstruction uses target weights to choose coefficients, and practical adaptation must learn coefficients from target-task interactions while keeping the source-fitted actor basis fixed. Critic training and all interaction costs must be counted separately. This validation adds no practical-adaptation result to the pilot.
 
 Future pilot manifests record measurement coverage and code hashes. Completion requires the expected source/evaluation slots and valid initialization metadata, rather than merely finishing before the runtime deadline. The runner rejects nonpositive evaluation counts/reserves and nonempty output directories to preserve previous runs. Existing pilot manifests and checkpoints are not rewritten by these checks.
+
+## Supported runtime and competence screen
+
+The isolated lock was installed and its CUDA reset/step, 256-step SAC update, checkpoint/reload, and fresh-episode path passed locally on 2026-10-15. The root MiniHack environment is separate. From the repository root, use the isolated interpreter explicitly:
+
+```bash
+uv sync --project experiments/metaworld --frozen --no-dev
+env -u PYTHONPATH experiments/metaworld/.venv/bin/python -m scripts.metaworld_runtime_smoke \
+  --output artifacts/metaworld-runtime-smoke-new --device cuda
+env -u PYTHONPATH experiments/metaworld/.venv/bin/python -m scripts.metaworld_competence \
+  --output artifacts/metaworld-competence-new --seconds 2500 --reserve-seconds 300 \
+  --steps-per-policy 25000 --evaluation-episodes 20 --seed 20261015 --device cuda
+```
+
+The second command trains one policy each on reach, push and pick-place using a shared initial actor and separate task-specific critic/environment/training seeds. It saves the shared initial actor, final checkpoints, layouts/hashes and every fresh own-task episode. Each task passes the operational screen only with complete 25,000-step training and at least 16 of 20 successful complete evaluation episodes; the whole screen also requires matching initial actor hashes. A completed screen can fail competence without being a runtime error. A 128-step/one-episode invocation is labeled as smoke data and is kept separate.
+
+This small screen performs no oracle projections or practical adaptation. Its single-library result does not estimate seed variability. The 2026-10-15 launch is authorized for one inclusive local hour; these example commands do not authorize additional compute or another run. Preserve failures and partial outcomes under the global deadline rather than extending it.
