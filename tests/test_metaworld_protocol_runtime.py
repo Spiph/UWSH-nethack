@@ -11,13 +11,14 @@ from typing import Any
 
 import numpy as np
 
-from scripts.metaworld_deadlines import RunDeadline
+from scripts.metaworld_deadlines import RunDeadline, guard_env
 from scripts.metaworld_protocol import (
     GoalManifest,
     SeedStreams,
     build_seeded_sac,
     evaluation_record,
     generate_goal_bank,
+    make_protocol_env,
 )
 
 RUNTIME_AVAILABLE = all(
@@ -113,8 +114,6 @@ class SB3ProtocolTests(unittest.TestCase):
 @unittest.skipUnless(PHYSICS_AVAILABLE, "requires the isolated pinned Meta-World/MuJoCo runtime")
 class PhysicsProtocolTests(unittest.TestCase):
     def test_paired_task_sequences_and_full_horizon_without_policy_training(self) -> None:
-        from scripts.metaworld_hour_pilot import make_env
-
         budget = RunDeadline(60, datetime.now(timezone.utc) + timedelta(seconds=60))
         transitions = 0
         for task in ("reach-v3", "push-v3", "pick-place-v3"):
@@ -127,15 +126,14 @@ class PhysicsProtocolTests(unittest.TestCase):
                 GoalManifest((source, development))
                 envs = []
                 try:
-                    for seed in (17, 18):
+                    for _ in range(2):
+                        budget.require("paired_environment_initialization")
                         envs.append(
-                            make_env(
-                                task,
-                                seed,
-                                streams=streams,
-                                bank=development,
-                                goal_order=(0, 1),
-                                budget=budget,
+                            guard_env(
+                                make_protocol_env(
+                                    task, streams, bank=development, goal_order=(0, 1)
+                                ),
+                                budget,
                             )
                         )
                     left, right = envs
