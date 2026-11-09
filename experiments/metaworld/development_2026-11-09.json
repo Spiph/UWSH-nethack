@@ -1,0 +1,180 @@
+{
+  "algorithm": {
+    "batch_size": 256,
+    "buffer_size": 50000,
+    "device": "cuda",
+    "ent_coef": "auto",
+    "gamma": 0.99,
+    "gradient_steps": 1,
+    "learning_rate": 0.0003,
+    "learning_starts": 1000,
+    "name": "SAC",
+    "net_arch": [
+      256,
+      256
+    ],
+    "policy": "MlpPolicy",
+    "tau": 0.005,
+    "torch_threads": 4,
+    "train_freq": 1
+  },
+  "allocation_option": "approved_6h_local",
+  "authorization": {
+    "approved": true,
+    "concurrency": 1,
+    "hardware": "NVIDIA GeForce RTX 4060 Laptop GPU",
+    "hosted_services": false,
+    "issue": 37,
+    "paid_services": false,
+    "resolution_url": "https://github.com/Spiph/UWSH-nethack/issues/37#issuecomment-6744153267",
+    "user_approval_url": "https://github.com/Spiph/UWSH-nethack/issues/37#issuecomment-6744072078"
+  },
+  "environment": {
+    "action_dimensions": 4,
+    "gymnasium_version": "1.1.1",
+    "max_episode_steps": 500,
+    "metaworld_version": "3.1.1",
+    "mujoco_version": "3.3.0",
+    "observation_bounds_adapter": "goal_metadata_only",
+    "observation_dimensions": 39,
+    "observation_normalization": false,
+    "reward_function_version": "v2",
+    "reward_normalization": false,
+    "stable_baselines3_version": "2.6.0",
+    "task_id_observation": false,
+    "terminate_on_success": false,
+    "time_limit_bootstrap": true,
+    "torch_version": "2.3.0",
+    "visible_goal_indices": [
+      36,
+      37,
+      38
+    ]
+  },
+  "evaluation": {
+    "early_stop": "earliest_passing_milestone",
+    "episode_horizon": 500,
+    "episodes": 20,
+    "goal_order": "bank_order_once_per_checkpoint",
+    "partial_episodes_count": false,
+    "required_successes": 16,
+    "success_aggregation": "any_time_in_complete_episode"
+  },
+  "goal_counts": {
+    "development": 20,
+    "final_test": 0,
+    "source": 50
+  },
+  "limits": {
+    "development_evaluation_steps": 60000,
+    "final_test_steps": 0,
+    "new_artifact_bytes": 2147483648,
+    "preflight_steps": 1000,
+    "retries": 0,
+    "source_policy_starts": 3,
+    "source_training_steps": 750000,
+    "target_steps": 0,
+    "total_agent_steps": 811000
+  },
+  "milestones": [
+    100000,
+    250000
+  ],
+  "output": "/home/icannon/code/UWSH-nethack/artifacts/metaworld-development-2026-11-09",
+  "purpose": "exploratory_source_competence_development",
+  "schema_version": 1,
+  "seed_derivation": {
+    "algorithm": "uint32 big-endian first4bytes SHA256(UTF8(str(seed)+':'+label))",
+    "development_model_streams": "actor/critic/training copied from source and unused",
+    "development_namespace": "2026111501 + task_index; labels selection/episode/action",
+    "effective_bank_seed": "derive_seed(task_bank, split)",
+    "source_derived_fields": "constructor/episode from task_bank; action from training"
+  },
+  "session": {
+    "deadline_utc": "2026-11-09T21:35:00Z",
+    "evaluation_reserve_seconds": 1800,
+    "max_wall_seconds": 21600,
+    "preflight_phase_seconds": 900,
+    "preparation_counts_against_session": true,
+    "started_at_utc": "2026-11-09T15:35:00Z",
+    "training_deadline_utc": "2026-11-09T21:05:00Z"
+  },
+  "stopping_rule": "Round-robin cumulative milestones; stop each task at its first complete 16/20 pass. Otherwise stop at 250000 source steps. Preserve learner/replay state across stages. No retry, replacement, sweep, target adaptation, final-test access or extension. Stop preflight after 900 phase seconds, training at 21:05Z and all interaction at 21:35Z. Retain partial/failed outcomes; the frozen session never restarts.",
+  "tasks": [
+    {
+      "development_streams": {
+        "action": 1151139223,
+        "actor": 2026110901,
+        "constructor": 1342235002,
+        "critic": 2026111001,
+        "episode": 3540859572,
+        "selection": 665863105,
+        "task_bank": 2026111401,
+        "training": 2026111101
+      },
+      "effective_development_bank_seed": 4195170360,
+      "effective_source_bank_seed": 440720382,
+      "source_streams": {
+        "action": 4181628140,
+        "actor": 2026110901,
+        "constructor": 108908142,
+        "critic": 2026111001,
+        "episode": 1645122854,
+        "selection": 2026111301,
+        "task_bank": 2026111201,
+        "training": 2026111101
+      },
+      "task": "reach-v3"
+    },
+    {
+      "development_streams": {
+        "action": 4147030577,
+        "actor": 2026110901,
+        "constructor": 1974162236,
+        "critic": 2026111002,
+        "episode": 65648104,
+        "selection": 3622905703,
+        "task_bank": 2026111402,
+        "training": 2026111102
+      },
+      "effective_development_bank_seed": 623538615,
+      "effective_source_bank_seed": 3681745525,
+      "source_streams": {
+        "action": 3723782036,
+        "actor": 2026110901,
+        "constructor": 1514248888,
+        "critic": 2026111002,
+        "episode": 265781724,
+        "selection": 2026111302,
+        "task_bank": 2026111202,
+        "training": 2026111102
+      },
+      "task": "push-v3"
+    },
+    {
+      "development_streams": {
+        "action": 2688823336,
+        "actor": 2026110901,
+        "constructor": 3445772660,
+        "critic": 2026111003,
+        "episode": 2628161597,
+        "selection": 87594743,
+        "task_bank": 2026111403,
+        "training": 2026111103
+      },
+      "effective_development_bank_seed": 968440198,
+      "effective_source_bank_seed": 2687861073,
+      "source_streams": {
+        "action": 501398125,
+        "actor": 2026110901,
+        "constructor": 1970042426,
+        "critic": 2026111003,
+        "episode": 880566976,
+        "selection": 2026111303,
+        "task_bank": 2026111203,
+        "training": 2026111103
+      },
+      "task": "pick-place-v3"
+    }
+  ]
+}
