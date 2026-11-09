@@ -469,12 +469,21 @@ def make_protocol_env(
     def protocol_manifest(wrapper: Any) -> dict[str, Any]:
         return controller.protocol_manifest()
 
+    def protocol_controller(wrapper: Any) -> TaskController:
+        """Expose the synchronous controller for explicitly verified recovery only."""
+        return controller
+
     # Construct the runtime-only subclass after importing optional Gymnasium;
     # manifest/seed tools stay importable and type-checkable without that stack.
     wrapper_type = type(
         "ControlledTaskEnv",
         (gym.Wrapper,),
-        {"reset": reset, "step": step, "protocol_manifest": protocol_manifest},
+        {
+            "reset": reset,
+            "step": step,
+            "protocol_manifest": protocol_manifest,
+            "protocol_controller": protocol_controller,
+        },
     )
     return wrapper_type(env)
 
