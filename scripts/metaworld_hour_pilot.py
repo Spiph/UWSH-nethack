@@ -7,7 +7,6 @@ import csv
 import hashlib
 import json
 import platform
-import time
 import traceback
 from datetime import datetime, timezone
 from importlib.metadata import version
@@ -24,6 +23,14 @@ from stable_baselines3 import SAC
 from stable_baselines3.common.callbacks import BaseCallback
 
 if __package__:
+    from .metaworld_deadlines import (
+        BudgetExpired,
+        RunDeadline,
+        TrainingDeadline,
+        guard_env,
+        guard_model,
+        parse_deadline,
+    )
     from .metaworld_geometry import (
         actor_vector,
         fit_centered_basis,
@@ -35,6 +42,14 @@ if __package__:
     )
     from .metaworld_pilot_report import summarize_manifest
 else:
+    from metaworld_deadlines import (
+        BudgetExpired,
+        RunDeadline,
+        TrainingDeadline,
+        guard_env,
+        guard_model,
+        parse_deadline,
+    )
     from metaworld_geometry import (
         actor_vector,
         fit_centered_basis,
@@ -83,29 +98,33 @@ class CorrectedGoalBounds(ObservationWrapper):
         return obs
 
 
-def make_env(task: str, seed: int) -> gym.Env:
+def make_env(task: str, seed: int, *, budget: RunDeadline | None = None) -> gym.Env:
     if task not in TASKS:
         raise ValueError(f"unsupported task: {task}")
     env_id = "Meta-World/MT1"
     if env_id not in gym.registry:
         metaworld.register_mw_envs()
+    if budget is not None:
+        budget.require("environment_initialization")
     env = gym.make(env_id, env_name=task, disable_env_checker=True)
     wrapped = CorrectedGoalBounds(env)
-    wrapped.reset(seed=seed)
+    if budget is not None:
+        guard_env(wrapped, budget)
+    try:
+        wrapped.reset(seed=seed)
+    except BaseException:
+        wrapped.close()
+        raise
     return wrapped
 
 
-class DeadlineCallback(BaseCallback):
-    def __init__(self, deadline: float):
-        super().__init__(verbose=0)
-        self.deadline = deadline
-        self.stopped_for_budget = False
+class DeadlineCallback(BaseCallback, TrainingDeadline):
+    def __init__(self, budget: RunDeadline, *, reserve_seconds: float = 0):
+        BaseCallback.__init__(self, verbose=0)
+        TrainingDeadline.__init__(self, budget, reserve_seconds=reserve_seconds)
 
     def _on_step(self) -> bool:
-        if self.n_calls % 128 == 0 and time.monotonic() >= self.deadline:
-            self.stopped_for_budget = True
-            return False
-        return True
+        return TrainingDeadline.on_step(self)
 
 
 def atomic_json(path: Path, payload: Any) -> None:
@@ -138,27 +157,41 @@ def eval_model(
     policy_id: str,
     kind: str,
     episode_count: int,
-    deadline: float,
+    budget: RunDeadline,
 ) -> list[dict[str, Any]]:
-    env = make_env(task, BASE_SEED + 700_000 + replicate * 10_000 + TASKS.index(task) * 100)
+    budget.require("evaluation_initialization")
+    env = make_env(
+        task,
+        BASE_SEED + 700_000 + replicate * 10_000 + TASKS.index(task) * 100,
+        budget=budget,
+    )
     rows: list[dict[str, Any]] = []
     try:
         for episode in range(episode_count):
-            if time.monotonic() >= deadline:
+            if not budget.allowed("evaluation_episode"):
                 break
-            observation, _ = env.reset(seed=BASE_SEED + 800_000 + replicate * 10_000 + episode)
+            try:
+                observation, _ = env.reset(seed=BASE_SEED + 800_000 + replicate * 10_000 + episode)
+            except BudgetExpired:
+                break
             total_return = 0.0
             max_success = 0.0
             length = 0
             terminated = truncated = False
             while not (terminated or truncated):
-                if time.monotonic() >= deadline:
+                if not budget.allowed("evaluation_episode"):
                     break
                 action, _ = model.predict(observation, deterministic=True)
-                observation, reward, terminated, truncated, info = env.step(action)
+                if not budget.allowed("evaluation_step"):
+                    break
+                try:
+                    observation, reward, terminated, truncated, info = env.step(action)
+                except BudgetExpired:
+                    break
                 total_return += float(reward)
                 max_success = max(max_success, float(info.get("success", 0.0)))
                 length += 1
+            budget.allowed("evaluation_return")
             if length:
                 rows.append(
                     {
@@ -173,9 +206,10 @@ def eval_model(
                         "success": max_success,
                         "length": length,
                         "complete_episode": bool(terminated or truncated),
+                        "cutoff_reason": budget.cutoff_reason,
                     }
                 )
-            if time.monotonic() >= deadline:
+            if not budget.allowed("evaluation_episode"):
                 break
     finally:
         env.close()
@@ -185,6 +219,7 @@ def eval_model(
 def main() -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--deadline-utc", type=parse_deadline, required=True)
     parser.add_argument("--seconds", type=int, default=2700)
     parser.add_argument("--steps-per-policy", type=int, default=25_000)
     parser.add_argument("--evaluation-episodes", type=int, default=3)
@@ -199,16 +234,10 @@ def main() -> int:
         parser.error("--evaluation-episodes must be positive")
     if args.output.exists() and (not args.output.is_dir() or any(args.output.iterdir())):
         parser.error("--output must be a new or empty directory; existing runs are preserved")
-    torch.set_num_threads(4)
+    budget = RunDeadline(args.seconds, args.deadline_utc)
     args.output.mkdir(parents=True, exist_ok=True)
-    run_started = time.monotonic()
-    deadline = run_started + args.seconds
-    train_deadline = deadline - args.reserve_seconds
     device = args.device
-    if device == "auto":
-        device = "cuda" if torch.cuda.is_available() else "cpu"
-    if device == "cuda" and not torch.cuda.is_available():
-        parser.error("CUDA requested but unavailable")
+    cuda_available = False
 
     manifest: dict[str, Any] = {
         "status": "RUNNING",
@@ -216,9 +245,14 @@ def main() -> int:
         "runner_sha256": hashlib.sha256(Path(__file__).read_bytes()).hexdigest(),
         "measurement_code_sha256": {
             name: hashlib.sha256(Path(__file__).with_name(name).read_bytes()).hexdigest()
-            for name in ("metaworld_geometry.py", "metaworld_pilot_report.py")
+            for name in (
+                "metaworld_geometry.py",
+                "metaworld_pilot_report.py",
+                "metaworld_deadlines.py",
+            )
         },
-        "started_at_utc": datetime.now(timezone.utc).isoformat(),
+        "started_at_utc": budget.started_utc.isoformat(),
+        "absolute_deadline_utc": budget.deadline_utc.isoformat(),
         "user_wall_budget_seconds": 3600,
         "runner_budget_seconds": args.seconds,
         "evaluation_reserve_seconds": args.reserve_seconds,
@@ -228,22 +262,12 @@ def main() -> int:
         "replicates": REPLICATES,
         "conditions": list(CONDITIONS),
         "planned_source_runs": len(TASKS) * REPLICATES * len(CONDITIONS),
-        "hardware": {
-            "platform": platform.platform(),
-            "processor": platform.processor(),
-            "torch": torch.__version__,
-            "torch_cuda": torch.cuda.is_available(),
-            "device": device,
-            "gpu": torch.cuda.get_device_name(0) if torch.cuda.is_available() else None,
-        },
-        "software": {
-            "python": platform.python_version(),
-            "numpy": np.__version__,
-            "gymnasium": gym.__version__,
-            "mujoco": __import__("mujoco").__version__,
-            "stable_baselines3": __import__("stable_baselines3").__version__,
-            "metaworld_release": version("metaworld"),
-        },
+        "hardware": {},
+        "software": {},
+        "timing_scope": (
+            "Runner duration starts after legacy module imports. Absolute UTC is checked "
+            "before thread/CUDA/environment/model initialization; imports precede that check."
+        ),
         "observation_adapter": {
             "shape": [39],
             "action_shape": [4],
@@ -267,18 +291,50 @@ def main() -> int:
         "oracle_projection_diagnostics": [],
         "errors": [],
     }
+    budget.record(manifest)
     atomic_json(args.output / "pilot_manifest.json", manifest)
     source_models: dict[tuple[str, int, str], dict[str, Any]] = {}
     all_eval: list[dict[str, Any]] = []
+    active_env = None
     try:
+        budget.require("runtime_initialization")
+        torch.set_num_threads(4)
+        budget.require("cuda_availability")
+        cuda_available = torch.cuda.is_available()
+        if device == "auto":
+            device = "cuda" if cuda_available else "cpu"
+        if device == "cuda" and not cuda_available:
+            raise ValueError("CUDA requested but unavailable")
+        budget.require("hardware_metadata")
+        manifest["hardware"] = {
+            "platform": platform.platform(),
+            "processor": platform.processor(),
+            "torch": torch.__version__,
+            "torch_cuda": cuda_available,
+            "device": device,
+            "gpu": torch.cuda.get_device_name(0) if cuda_available else None,
+        }
+        budget.require("runtime_metadata")
+        manifest["software"] = {
+            "python": platform.python_version(),
+            "numpy": np.__version__,
+            "gymnasium": gym.__version__,
+            "mujoco": __import__("mujoco").__version__,
+            "stable_baselines3": __import__("stable_baselines3").__version__,
+            "metaworld_release": version("metaworld"),
+        }
+        budget.require("preflight_initialization")
         # Reset/step preflight and actual architecture symmetry control.
-        preflight_env = make_env(TASKS[0], BASE_SEED)
+        active_env = preflight_env = make_env(TASKS[0], BASE_SEED, budget=budget)
+        budget.require("preflight_reset")
         observation, _ = preflight_env.reset(seed=BASE_SEED)
         if observation.shape != (39,) or preflight_env.action_space.shape != (4,):
             raise ValueError("unexpected task interface")
+        budget.require("preflight_step")
         step = preflight_env.step(preflight_env.action_space.sample())
         if not np.isfinite(step[0]).all():
             raise ValueError("nonfinite preflight observation")
+        budget.require("preflight_model_initialization")
         probe = SAC(
             "MlpPolicy",
             preflight_env,
@@ -290,11 +346,13 @@ def main() -> int:
             batch_size=64,
             learning_starts=64,
         )
+        budget.require("preflight_symmetry")
         manifest["permutation_control_max_abs_error"] = verify_policy_symmetry(
             probe.policy.actor, BASE_SEED + 1
         )
         del probe
         preflight_env.close()
+        active_env = None
         atomic_json(args.output / "pilot_manifest.json", manifest)
 
         total_index = 0
@@ -302,7 +360,9 @@ def main() -> int:
             shared_actor_state: dict[str, torch.Tensor] | None = None
             for condition_index, condition in enumerate(CONDITIONS):
                 for task_index, task in enumerate(TASKS):
-                    if time.monotonic() >= train_deadline:
+                    if not budget.allowed(
+                        "training_initialization", reserve_seconds=args.reserve_seconds
+                    ):
                         break
                     env_seed = (
                         BASE_SEED + 100_000 + replicate * 1_000 + task_index * 10 + condition_index
@@ -312,7 +372,8 @@ def main() -> int:
                         init_seed += task_index * 10
                     torch.manual_seed(init_seed)
                     np.random.seed(env_seed)
-                    env = make_env(task, env_seed)
+                    active_env = env = make_env(task, env_seed, budget=budget)
+                    budget.require("source_model_initialization")
                     model = SAC(
                         "MlpPolicy",
                         env,
@@ -360,10 +421,18 @@ def main() -> int:
                         if initial_hash != expected:
                             raise ValueError("shared actor initialization hash mismatch")
 
-                    callback = DeadlineCallback(train_deadline)
-                    job_started = time.monotonic()
-                    model.learn(args.steps_per_policy, callback=callback, progress_bar=False)
-                    elapsed = time.monotonic() - job_started
+                    callback = DeadlineCallback(budget, reserve_seconds=args.reserve_seconds)
+                    job_started = budget.monotonic()
+                    guard_model(model, budget)
+                    try:
+                        if budget.allowed("training_start", reserve_seconds=args.reserve_seconds):
+                            model.learn(
+                                args.steps_per_policy, callback=callback, progress_bar=False
+                            )
+                    except BudgetExpired:
+                        pass  # Save the actual partial checkpoint before stopping.
+                    budget.allowed("training_return")
+                    elapsed = budget.monotonic() - job_started
                     ident = run_id(condition, task, replicate)
                     job_dir = args.output / "policies"
                     job_dir.mkdir(exist_ok=True)
@@ -388,7 +457,10 @@ def main() -> int:
                         "steps_requested": args.steps_per_policy,
                         "duration_seconds": elapsed,
                         "steps_per_second": model.num_timesteps / max(elapsed, 1e-9),
-                        "stopped_for_wall_budget": callback.stopped_for_budget,
+                        "stopped_for_wall_budget": (
+                            callback.stopped_for_budget or budget.cutoff_reason is not None
+                        ),
+                        "training_cutoff_reason": callback.cutoff_reason or budget.cutoff_reason,
                         "model_file": str(model_path.with_suffix(".zip")),
                         "actor_file": str(job_dir / f"{ident}.actor.npz"),
                         "actor_layout": layout,
@@ -402,6 +474,7 @@ def main() -> int:
                     manifest["status"] = "TRAINING"
                     atomic_json(args.output / "pilot_manifest.json", manifest)
                     env.close()
+                    active_env = None
                     del model
                     total_index += 1
                     steps_completed = record["environment_steps_completed"]
@@ -413,7 +486,9 @@ def main() -> int:
                     )
                     if callback.stopped_for_budget:
                         break
-                if time.monotonic() >= train_deadline:
+                if not budget.allowed(
+                    "training_initialization", reserve_seconds=args.reserve_seconds
+                ):
                     break
 
         manifest["training_complete"] = len(manifest["source_runs"]) == manifest[
@@ -429,9 +504,10 @@ def main() -> int:
         # Every completed source policy is evaluated on each task with new reset seeds.
         for (condition, replicate, training_task), item in source_models.items():
             for evaluation_task in TASKS:
-                if time.monotonic() >= deadline:
+                if not budget.allowed("evaluation_episode"):
                     break
-                env = make_env(evaluation_task, BASE_SEED + 900_000)
+                active_env = env = make_env(evaluation_task, BASE_SEED + 900_000, budget=budget)
+                budget.require("evaluation_model_load")
                 model = SAC.load(item["path"], env=env, device=device)
                 rows = eval_model(
                     model,
@@ -441,10 +517,11 @@ def main() -> int:
                     run_id(condition, training_task, replicate),
                     "trained_policy",
                     args.evaluation_episodes,
-                    deadline,
+                    budget,
                 )
                 all_eval.extend(rows)
                 env.close()
+                active_env = None
                 del model
                 manifest["cross_task_evaluations"] = all_eval
                 save_rows(args.output / "cross_task_evaluations.csv", all_eval)
@@ -454,7 +531,7 @@ def main() -> int:
         for condition in CONDITIONS:
             for replicate in range(REPLICATES):
                 for target_task in TASKS:
-                    if time.monotonic() >= deadline:
+                    if not budget.allowed("evaluation_episode"):
                         break
                     sources = [
                         source_models.get((condition, replicate, task))
@@ -504,9 +581,10 @@ def main() -> int:
                         ("oracle_learned_rank1", learned_vector),
                         ("oracle_random_rank1", random_vector),
                     ):
-                        if time.monotonic() >= deadline:
+                        if not budget.allowed("evaluation_episode"):
                             break
-                        env = make_env(target_task, BASE_SEED + 950_000)
+                        active_env = env = make_env(target_task, BASE_SEED + 950_000, budget=budget)
+                        budget.require("oracle_model_load")
                         model = SAC.load(target["path"], env=env, device=device)
                         load_actor_vector(model.policy.actor, vector, target["layout"])
                         rows = eval_model(
@@ -517,18 +595,18 @@ def main() -> int:
                             run_id(condition, target_task, replicate),
                             kind,
                             args.evaluation_episodes,
-                            deadline,
+                            budget,
                         )
                         all_eval.extend(rows)
                         env.close()
+                        active_env = None
                         del model
                     manifest["oracle_projection_diagnostics"].append(diag)
                     manifest["cross_task_evaluations"] = all_eval
                     save_rows(args.output / "cross_task_evaluations.csv", all_eval)
                     atomic_json(args.output / "pilot_manifest.json", manifest)
 
-        manifest["elapsed_seconds"] = time.monotonic() - run_started
-        manifest["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+        budget.record(manifest)
         report = summarize_manifest(manifest)
         manifest["coverage_validation"] = report["coverage"]
         manifest["initialization_validation"] = report["initialization"]
@@ -538,24 +616,63 @@ def main() -> int:
             and manifest["evaluation_complete"]
             and report["initialization"]["valid"]
         )
-        if manifest["validation_complete"]:
-            manifest["status"] = "COMPLETE_EXPLORATORY"
-        elif time.monotonic() >= deadline:
+        if not budget.allowed("completion"):
             manifest["status"] = "STOPPED_AT_BUDGET"
+        elif manifest["validation_complete"]:
+            manifest["status"] = "COMPLETE_EXPLORATORY"
         else:
             manifest["status"] = "INCOMPLETE_EXPLORATORY"
+    except BudgetExpired:
+        manifest["status"] = "STOPPED_AT_BUDGET"
     except Exception as error:
         manifest["status"] = "ERROR"
         manifest["error"] = f"{type(error).__name__}: {error}"
         manifest["traceback"] = traceback.format_exc()
-        manifest["elapsed_seconds"] = time.monotonic() - run_started
-        manifest["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
+        budget.record(manifest)
         atomic_json(args.output / "pilot_manifest.json", manifest)
         raise
     finally:
-        if torch.cuda.is_available():
+        if active_env is not None:
+            active_env.close()
+        budget.record(manifest)
+        report = summarize_manifest(manifest)
+        manifest["coverage_validation"] = report["coverage"]
+        manifest["initialization_validation"] = report["initialization"]
+        manifest["training_complete"] = len(manifest["source_runs"]) == manifest[
+            "planned_source_runs"
+        ] and all(
+            r["environment_steps_completed"] == args.steps_per_policy
+            for r in manifest["source_runs"]
+        )
+        manifest["training_cut_short"] = not manifest["training_complete"]
+        manifest["evaluation_complete"] = report["coverage"]["complete"]
+        manifest["validation_complete"] = bool(
+            manifest["training_complete"]
+            and manifest["evaluation_complete"]
+            and report["initialization"]["valid"]
+            and manifest["budget_compliant"]
+            and manifest["status"] == "COMPLETE_EXPLORATORY"
+        )
+        # Preserve all actual and missing source/evaluation slots, even on late start.
+        actual = {r["policy_id"] for r in manifest["source_runs"]}
+        manifest["incomplete_source_runs"] = [
+            run_id(condition, task, replicate)
+            for condition in CONDITIONS
+            for replicate in range(REPLICATES)
+            for task in TASKS
+            if run_id(condition, task, replicate) not in actual
+            or any(
+                r["policy_id"] == run_id(condition, task, replicate)
+                and r["environment_steps_completed"] != args.steps_per_policy
+                for r in manifest["source_runs"]
+            )
+        ]
+        budget.record(manifest)
+        atomic_json(args.output / "pilot_manifest.json", manifest)
+        if cuda_available:
             torch.cuda.empty_cache()
-    atomic_json(args.output / "pilot_manifest.json", manifest)
+        budget.record(manifest)
+        atomic_json(args.output / "pilot_manifest.json", manifest)
     print(
         json.dumps(
             {
