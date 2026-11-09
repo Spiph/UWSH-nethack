@@ -8,7 +8,7 @@ The historical pilot tested setup, competence and preliminary functional reuse w
 
 The original pilot reused the repository's Python 3.10 and CUDA-enabled PyTorch 2.2.2 through a temporary isolated environment. The supported runtime uses this project's checked-in dependency lock instead. Install it with `uv sync --frozen` and invoke its interpreter with `PYTHONPATH` removed, as shown below.
 
-The standalone lock uses Torch 2.3.0 to meet Stable-Baselines3's declared requirement and NumPy 1.26.4 to match the locally validated NumPy version. The original pilot reused Torch 2.2.2 outside that declared dependency range; the pinned runtime subsequently passed the separate 2026-10-15 mechanics check described below. The corrected task/seed protocol still needs physical MuJoCo validation under a new allocation. The measurement-only commands below use the existing repository environment.
+The standalone lock uses Torch 2.3.0 to meet Stable-Baselines3's declared requirement and NumPy 1.26.4 to match the locally validated NumPy version. The original pilot reused Torch 2.2.2 outside that declared dependency range; the pinned runtime subsequently passed the separate 2026-10-15 mechanics check described below. The corrected task/seed protocol passed bounded CPU validation on 2026-11-09: paired reset/step sequences for reach, push and pick-place, plus the full 500-step reach truncation. This used 522 fixed-action transitions and no policy training; competence and practical adaptation remain separate gates. The measurement-only commands below use the existing repository environment.
 
 ```bash
 uv sync --project experiments/metaworld --frozen
@@ -101,3 +101,10 @@ python -m pytest tests/test_metaworld_protocol.py
 These tests and source inspection do not constitute a new MuJoCo rollout validation or approve training.
 
 The optional `test_metaworld_protocol_runtime.py` checks actual SAC construction and replay storage using synthetic Gymnasium spaces, with zero environment resets/steps and no learning. Run it with the existing isolated interpreter using `python -m unittest discover -s tests -p test_metaworld_protocol_runtime.py -v`. It checks actor/critic seed separation, optimizer parameter references, time-limit bootstrapping and storage of the terminal observation instead of an autoreset observation. Ordinary development pytest skips these two tests when SB3 is absent.
+
+Optional pinned-runtime checks verify actual SB3 model-seed separation and replay timeout handling on synthetic inputs, then paired physical goal sequences across all three configured tasks and the 500-step reach horizon. The physical check uses at most 522 fixed-action transitions, a 60-second dual-clock guard, no learned policy and no training. It does not measure competence or transfer. All three checks passed locally on 2026-11-09; the dependency-light development environment skips them because the optional stack is isolated.
+
+```bash
+env -u PYTHONPATH experiments/metaworld/.venv/bin/python -m unittest discover \
+  -s tests -p test_metaworld_protocol_runtime.py -v
+```

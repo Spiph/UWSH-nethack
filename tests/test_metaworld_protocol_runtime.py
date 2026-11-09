@@ -1,4 +1,4 @@
-"""Optional SB3 unit checks on synthetic spaces: no MuJoCo, reset, step or learn."""
+"""Optional pinned-runtime constructor, replay and bounded physics checks."""
 
 from __future__ import annotations
 
@@ -6,14 +6,25 @@ import importlib
 import importlib.util
 import unittest
 from dataclasses import replace
+from datetime import datetime, timedelta, timezone
 from typing import Any
 
 import numpy as np
 
-from scripts.metaworld_protocol import SeedStreams, build_seeded_sac
+from scripts.metaworld_deadlines import RunDeadline
+from scripts.metaworld_protocol import (
+    GoalManifest,
+    SeedStreams,
+    build_seeded_sac,
+    evaluation_record,
+    generate_goal_bank,
+)
 
 RUNTIME_AVAILABLE = all(
     importlib.util.find_spec(name) is not None for name in ("gymnasium", "stable_baselines3")
+)
+PHYSICS_AVAILABLE = RUNTIME_AVAILABLE and all(
+    importlib.util.find_spec(name) is not None for name in ("metaworld", "mujoco")
 )
 
 
@@ -97,6 +108,73 @@ class SB3ProtocolTests(unittest.TestCase):
         samples = replay._get_samples(np.array([0, 1]))
         self.assertEqual(samples.dones.cpu().numpy().tolist(), [[0.0], [1.0]])
         np.testing.assert_array_equal(samples.next_observations.cpu().numpy(), np.ones((2, 39)))
+
+
+@unittest.skipUnless(PHYSICS_AVAILABLE, "requires the isolated pinned Meta-World/MuJoCo runtime")
+class PhysicsProtocolTests(unittest.TestCase):
+    def test_paired_task_sequences_and_full_horizon_without_policy_training(self) -> None:
+        from scripts.metaworld_hour_pilot import make_env
+
+        budget = RunDeadline(60, datetime.now(timezone.utc) + timedelta(seconds=60))
+        transitions = 0
+        for task in ("reach-v3", "push-v3", "pick-place-v3"):
+            with self.subTest(task=task):
+                streams = SeedStreams.from_seed(2026110917)
+                budget.require("source_bank_validation")
+                source = generate_goal_bank(task, streams, split="source")
+                budget.require("development_bank_validation")
+                development = generate_goal_bank(task, streams, split="development")
+                GoalManifest((source, development))
+                envs = []
+                try:
+                    for seed in (17, 18):
+                        envs.append(
+                            make_env(
+                                task,
+                                seed,
+                                streams=streams,
+                                bank=development,
+                                goal_order=(0, 1),
+                                budget=budget,
+                            )
+                        )
+                    left, right = envs
+                    for env in envs:
+                        self.assertEqual(
+                            env.get_wrapper_attr("protocol_manifest")()["episode_history"], []
+                        )
+                    for episode in range(2):
+                        lo, li = left.reset(seed=11 + episode)
+                        ro, ri = right.reset(seed=999 + episode)
+                        np.testing.assert_array_equal(lo, ro)
+                        self.assertEqual(
+                            li["protocol"]["goal_id"], development.goals[episode].goal_id
+                        )
+                        self.assertEqual(li["protocol"]["goal_id"], ri["protocol"]["goal_id"])
+                        self.assertEqual(
+                            li["protocol"]["episode_seed"], ri["protocol"]["episode_seed"]
+                        )
+                        for _ in range(2):
+                            ls = left.step(np.zeros(4, dtype=np.float32))
+                            rs = right.step(np.zeros(4, dtype=np.float32))
+                            transitions += 2
+                            np.testing.assert_array_equal(ls[0], rs[0])
+                            np.testing.assert_equal(ls[1:4], rs[1:4])
+                    if task == "reach-v3":
+                        for _ in range(498):
+                            _, _, terminated, truncated, _ = left.step(
+                                np.zeros(4, dtype=np.float32)
+                            )
+                            transitions += 1
+                        self.assertIs(terminated, False)
+                        self.assertIs(truncated, True)
+                        record = evaluation_record(left)
+                        self.assertEqual(record["length"], 500)
+                        self.assertIs(record["complete_episode"], True)
+                finally:
+                    for env in envs:
+                        env.close()
+        self.assertEqual(transitions, 522)
 
 
 if __name__ == "__main__":
