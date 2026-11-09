@@ -58,12 +58,17 @@ class CappedWriter(io.BufferedWriter):
         super().__init__(io.FileIO(path, "wb"))
 
     def write(self, data: Any) -> int:
-        projected = max(self.high_water, self.tell() + len(data))
-        if self.others + projected > self.limit:
-            raise Stopped("artifact_storage_limit")
-        count = super().write(data)
-        self.high_water = max(self.high_water, self.tell())
-        return count
+        # Protocol 5 may pass PickleBuffer directly for large NumPy arrays.
+        # Its raw view also handles Fortran-contiguous exporters; nbytes counts
+        # bytes rather than elements or the leading dimension of a typed view.
+        view = data.raw() if isinstance(data, pickle.PickleBuffer) else memoryview(data)
+        with view:
+            projected = max(self.high_water, self.tell() + view.nbytes)
+            if self.others + projected > self.limit:
+                raise Stopped("artifact_storage_limit")
+            count = super().write(view)
+            self.high_water = max(self.high_water, self.tell())
+            return count
 
 
 class ArtifactStore:

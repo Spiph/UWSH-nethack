@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import pickle
 import random
 import subprocess
 import sys
@@ -8,7 +9,7 @@ from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
 from types import SimpleNamespace
-from typing import Any
+from typing import Any, Literal
 
 import numpy as np
 import pytest
@@ -445,3 +446,49 @@ assert not {'torch', 'gymnasium', 'mujoco', 'stable_baselines3'}.intersection(sy
     )
     assert result.returncode == 0, result.stderr
     assert "811000" in result.stdout
+
+
+@pytest.mark.parametrize("order", ["C", "F"])
+def test_large_protocol_five_array_roundtrips_through_capped_writer(
+    tmp_path: Path, order: Literal["C", "F"]
+) -> None:
+    array = np.array(np.arange(40000, dtype=np.float64).reshape(200, 200), order=order)
+    assert array.nbytes > 65536
+    store = ArtifactStore(tmp_path / "array", 1024**2)
+    with store.open("array.pkl") as handle:
+        pickle.dump({"array": array}, handle, protocol=5)
+    with (store.root / "array.pkl").open("rb") as handle:
+        loaded = pickle.load(handle)
+    np.testing.assert_array_equal(loaded["array"], array)
+    assert loaded["array"].dtype == array.dtype
+    assert store.size() > array.nbytes
+    assert store.size() <= store.limit
+
+
+def test_large_pickle_buffer_rejects_quota_before_writing_payload(tmp_path: Path) -> None:
+    array = np.arange(40000, dtype=np.float64)
+    store = ArtifactStore(tmp_path / "overrun", 128 * 1024)
+    with (
+        store.open("partial.pkl") as handle,
+        pytest.raises(Stopped, match="artifact_storage_limit"),
+    ):
+        pickle.dump(array, handle, protocol=5)
+    assert store.size() < array.nbytes
+    assert store.size() <= store.limit - store.reserve
+    store.json("failure.json", {"status": "INCOMPLETE"})
+    assert store.size() <= store.limit
+
+
+def test_typed_multidimensional_memoryview_is_charged_by_bytes(tmp_path: Path) -> None:
+    array = np.arange(32, dtype=np.float64).reshape(4, 8)
+    store = ArtifactStore(tmp_path / "typed", 200)
+    exporter: Any = array
+    view = memoryview(exporter)
+    assert len(view) == 4
+    assert array.nbytes == 256
+    with (
+        store.open("typed.bin") as handle,
+        pytest.raises(Stopped, match="artifact_storage_limit"),
+    ):
+        handle.write(view)
+    assert store.size() == 0
