@@ -84,6 +84,7 @@ strict = true
 packages = ["ups"]
 
 [tool.pytest.ini_options]
+pythonpath = ["."]
 addopts = "-ra --strict-markers"
 testpaths = ["tests"]
 

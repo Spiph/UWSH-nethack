@@ -423,12 +423,14 @@ def main() -> int:
 
                     callback = DeadlineCallback(budget, reserve_seconds=args.reserve_seconds)
                     job_started = budget.monotonic()
-                    guard_model(model, budget)
                     try:
-                        if budget.allowed("training_start", reserve_seconds=args.reserve_seconds):
-                            model.learn(
-                                args.steps_per_policy, callback=callback, progress_bar=False
-                            )
+                        with guard_model(model, budget):
+                            if budget.allowed(
+                                "training_start", reserve_seconds=args.reserve_seconds
+                            ):
+                                model.learn(
+                                    args.steps_per_policy, callback=callback, progress_bar=False
+                                )
                     except BudgetExpired:
                         pass  # Save the actual partial checkpoint before stopping.
                     budget.allowed("training_return")

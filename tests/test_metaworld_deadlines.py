@@ -529,3 +529,75 @@ def test_pilot_finalizer_cannot_persist_completion_if_summary_crosses_cutoff(
     assert writes[-1]["status"] == "STOPPED_AT_BUDGET"
     assert writes[-1]["validation_complete"] is False
     assert writes[-1]["budget_compliant"] is False
+
+
+def test_actual_pilot_enters_optimizer_guard_and_saves_partial_on_late_wake(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    pilot = load_pilot_without_runtime(monkeypatch)
+    clock = FakeClock()
+    budget = clock.budget(seconds=2700, cutoff=2000)
+    updates: list[str] = []
+
+    class Model:
+        def __init__(self, *args: Any, **kwargs: Any) -> None:
+            self.policy = SimpleNamespace(actor=torch.nn.Linear(39, 4))
+            self.num_timesteps = 0
+            self.seed = 0
+
+        def set_random_seed(self, seed: int) -> None:
+            pass
+
+        def learn(self, *args: Any, **kwargs: Any) -> None:
+            self.num_timesteps = 1
+            clock.advance(utc=3000, monotonic=0.01)
+            self.train()
+
+        def train(self) -> None:
+            updates.append("late optimizer update")
+
+        def save(self, path: str) -> None:
+            assert "train" not in vars(self)
+            Path(path + ".zip").write_text("partial checkpoint")
+
+    env = SimpleNamespace(
+        reset=lambda **kwargs: (np.zeros(39), {}),
+        step=lambda action: (np.zeros(39), 0, False, False, {}),
+        close=lambda: None,
+        action_space=SimpleNamespace(shape=(4,), sample=lambda: np.zeros(4)),
+        get_wrapper_attr=lambda name: lambda: {"fake_protocol": True},
+    )
+    monkeypatch.setattr(pilot, "SAC", Model)
+    monkeypatch.setattr(pilot, "verify_policy_symmetry", lambda *args: 0)
+    monkeypatch.setattr(pilot, "make_env", lambda *args, **kwargs: env)
+    monkeypatch.setattr(pilot, "RunDeadline", lambda *args: budget)
+    if hasattr(pilot, "build_seeded_sac"):
+        protocol = importlib.import_module("scripts.metaworld_protocol")
+
+        def bank(task: str, streams: Any, *, split: str) -> Any:
+            goal = protocol.Goal(task, "eA==", (1.0 if split == "source" else 2.0,))
+            return protocol.GoalBank(split, 1, (goal,))
+
+        monkeypatch.setattr(pilot, "generate_goal_bank", bank)
+        monkeypatch.setattr(pilot, "build_seeded_sac", lambda *args, **kwargs: (Model(), {}))
+    monkeypatch.setattr(
+        sys,
+        "argv",
+        [
+            "pilot",
+            "--output",
+            str(tmp_path),
+            "--deadline-utc",
+            "2026-11-09T12:03:20Z",
+            "--device",
+            "cpu",
+        ],
+    )
+    assert pilot.main() == 2
+    assert updates == []
+    result = json.loads((tmp_path / "pilot_manifest.json").read_text())
+    assert result["status"] == "STOPPED_AT_BUDGET"
+    assert result["cutoff_reason"] == "absolute_utc_deadline"
+    assert len(result["source_runs"]) == 1
+    assert result["source_runs"][0]["environment_steps_completed"] == 1
+    assert Path(result["source_runs"][0]["model_file"]).read_text() == "partial checkpoint"
