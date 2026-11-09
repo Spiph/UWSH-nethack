@@ -244,5 +244,74 @@ class DevelopmentRuntimeTests(unittest.TestCase):
             self.assert_rng_equal(reference_rng.state, actual_rng.state)
 
 
+@unittest.skipUnless(PINNED_RUNTIME, "requires the isolated pinned SB3 2.6.0 runtime")
+class ReplayBufferSerializationTests(unittest.TestCase):
+    """Production-sized replay serialization; no environment or policy is created."""
+
+    def replay(self) -> Any:
+        np = importlib.import_module("numpy")
+        gym = importlib.import_module("gymnasium")
+        replay_type = importlib.import_module("stable_baselines3.common.buffers").ReplayBuffer
+        replay = replay_type(
+            buffer_size=50000,
+            observation_space=gym.spaces.Box(-100, 100, shape=(39,), dtype=np.float64),
+            action_space=gym.spaces.Box(-1, 1, shape=(4,), dtype=np.float32),
+            device="cpu",
+            handle_timeout_termination=True,
+        )
+        # Synthetic data insertion exercises replay state without environment interaction.
+        replay.add(
+            np.ones((1, 39)),
+            np.full((1, 39), 2.0),
+            np.ones((1, 4)),
+            np.array([3.0]),
+            np.array([False]),
+            [{"TimeLimit.truncated": True}],
+        )
+        replay.observations[-1] = 17.0
+        replay.next_observations[-1] = 19.0
+        return replay
+
+    def test_fifty_thousand_slot_replay_roundtrip_without_environment_or_policy(self) -> None:
+        np = importlib.import_module("numpy")
+        runtime = importlib.import_module("scripts.metaworld_development")
+        replay = self.replay()
+        with tempfile.TemporaryDirectory(prefix="ups-large-replay-") as directory:
+            store = runtime.ArtifactStore(Path(directory) / "artifacts", 64 * 1024**2)
+            with store.open("replay.pkl") as handle:
+                pickle.dump(replay, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            with (store.root / "replay.pkl").open("rb") as handle:
+                loaded = pickle.load(handle)
+            self.assertEqual(loaded.buffer_size, 50000)
+            self.assertEqual(loaded.pos, replay.pos)
+            self.assertEqual(loaded.full, replay.full)
+            self.assertEqual(loaded.handle_timeout_termination, replay.handle_timeout_termination)
+            for field in (
+                "observations",
+                "next_observations",
+                "actions",
+                "rewards",
+                "dones",
+                "timeouts",
+            ):
+                np.testing.assert_array_equal(getattr(loaded, field), getattr(replay, field))
+            self.assertGreater(store.size(), 65536)
+            self.assertLessEqual(store.size(), store.limit)
+
+    def test_fifty_thousand_slot_replay_respects_storage_quota(self) -> None:
+        runtime = importlib.import_module("scripts.metaworld_development")
+        replay = self.replay()
+        with tempfile.TemporaryDirectory(prefix="ups-large-replay-cap-") as directory:
+            store = runtime.ArtifactStore(Path(directory) / "artifacts", 1024**2)
+            with (
+                store.open("partial.pkl") as handle,
+                self.assertRaisesRegex(runtime.Stopped, "artifact_storage_limit"),
+            ):
+                pickle.dump(replay, handle, protocol=pickle.HIGHEST_PROTOCOL)
+            self.assertLessEqual(store.size(), store.limit - store.reserve)
+            store.json("failure.json", {"status": "INCOMPLETE"})
+            self.assertLessEqual(store.size(), store.limit)
+
+
 if __name__ == "__main__":
     unittest.main()
