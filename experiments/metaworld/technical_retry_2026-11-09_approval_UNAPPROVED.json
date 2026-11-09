@@ -1,0 +1,24 @@
+{
+  "approved": false,
+  "authorization_url": null,
+  "code_commit": null,
+  "code_sha256": {
+    "metaworld_checkpoint_audit.py": "bc62c89fbc7f14e0c97538bc0748e582c48b1004db2b3efd63ba3a3fcbb34e66",
+    "metaworld_competence.py": "e5bb16cc08cb8988129487a31ae94c658dbf5caea487ee10d78d267bb3f76c89",
+    "metaworld_deadlines.py": "1f989c5f848f92a758aefde92cb4ab34d4af32b6d792952345593e1d416ff508",
+    "metaworld_development.py": "86bd5459e9d5786a8278d285fafbcea18e29bf82350c97b31021cef05f89055c",
+    "metaworld_development_plan.py": "960ff17fa1d262d95090203ec20f97b8d21bce0b2588845bc21f9b3d2c9e954c",
+    "metaworld_geometry.py": "1bbce34c5cbf9c443dd936c271c47478b64fbce044ea035850dc6ba39c287fb9",
+    "metaworld_hour_pilot.py": "7b662174b8ba22d0480ed58cf10e8d6c42b02f45fe3d97f5d1dfede395167a93",
+    "metaworld_pilot_report.py": "a8541c5fec27aed83b69d0887a16d2332dd4f74e76eb6eca404cecf571de4e9d",
+    "metaworld_protocol.py": "6a10710a85ee59bf43c2777d805d4ef18654284cd502872426f1452974bad650",
+    "metaworld_runtime_smoke.py": "6b03b0e144b484c337fed708483eeb7cbd4a42d59efa7b3513d5199d9664eafa",
+    "metaworld_technical_retry.py": "091426b5c04f9a1be329eba64ecc5ee2ba6ed162d1087c9f8500c12f62fc5b82"
+  },
+  "deadline_utc": "2026-11-09T21:35:00+00:00",
+  "output": "/home/icannon/code/UWSH-nethack/artifacts/metaworld-development-2026-11-09-r2",
+  "plan_sha256": "db64456636b332c192bae867bd08f20c8beffc4b9597d727c4024cd0c0d90fae",
+  "session_started_utc": "2026-11-09T15:35:00+00:00",
+  "technical_retry_contract_sha256": "224072b38b5c47bdbf4029944ecde09982e32342227c29f4c0d0b38351313b71",
+  "training_deadline_utc": "2026-11-09T21:05:00+00:00"
+}
