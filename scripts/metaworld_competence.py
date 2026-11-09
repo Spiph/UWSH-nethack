@@ -10,6 +10,7 @@ import json
 import platform
 import traceback
 from collections.abc import Sequence
+from dataclasses import asdict
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, cast
@@ -17,6 +18,17 @@ from typing import Any, cast
 import numpy as np
 
 from scripts.metaworld_deadlines import BudgetExpired, RunDeadline, guard_model, parse_deadline
+from scripts.metaworld_protocol import (
+    ENVIRONMENT_CONTRACT,
+    SCHEMA_VERSION,
+    GoalManifest,
+    SeedStreams,
+    build_seeded_sac,
+    evaluation_order,
+    evaluation_record,
+    generate_goal_bank,
+    validate_evaluation_coverage,
+)
 
 TASKS = ("reach-v3", "push-v3", "pick-place-v3")
 BASE_SEED = 20261015
@@ -49,6 +61,56 @@ def finite_real(value: Any) -> bool:
     if isinstance(value, bool) or not isinstance(value, (int, float, np.number)):
         return False
     return bool(np.isfinite(value))
+
+
+def _protocol_complete(manifest: dict[str, Any]) -> bool | None:
+    """Revalidate exact saved goals; legacy screens lack this protocol evidence."""
+    if "protocol_schema_version" not in manifest:
+        return None
+    if manifest["protocol_schema_version"] != SCHEMA_VERSION or manifest.get(
+        "evaluation_protocol_validation"
+    ) != dict.fromkeys(TASKS, True):
+        return False
+    if any(
+        not isinstance(manifest.get(name), list)
+        or any(not isinstance(row, dict) for row in manifest[name])
+        for name in ("task_runs", "evaluations")
+    ):
+        return False
+    try:
+        for task in TASKS:
+            goals = GoalManifest.from_dict(manifest["goal_manifests"][task])
+            source, development = goals.for_fitting(), goals.for_tuning()
+            if (
+                goals.transfer_regime != "development_only"
+                or len(source) != 1
+                or len(development) != 1
+                or source[0].goals[0].task != task
+                or development[0].goals[0].task != task
+            ):
+                return False
+            goals.validate_source_policy_records(
+                [row for row in manifest["task_runs"] if row.get("task") == task]
+            )
+            order = evaluation_order(development[0], manifest["evaluation_episodes_requested"])
+            plan = manifest["evaluation_plans"][task]
+            streams = SeedStreams(**plan["rng_streams"])
+            if (
+                plan["goal_bank_sha256"] != development[0].sha256
+                or plan["goal_order"] != list(order)
+                or plan["goal_ids"] != [development[0].goals[index].goal_id for index in order]
+            ):
+                return False
+            rows = [row for row in manifest["evaluations"] if row.get("task") == task]
+            validate_evaluation_coverage(rows, development[0], order)
+            episode_rng = np.random.default_rng(streams.episode)
+            for row in rows:
+                expected = int(episode_rng.integers(0, 2**32, dtype=np.uint64))
+                if type(row.get("episode_seed")) is not int or row["episode_seed"] != expected:
+                    return False
+    except (KeyError, TypeError, ValueError, IndexError, AttributeError):
+        return False
+    return True
 
 
 def summarize_competence(manifest: dict[str, Any]) -> dict[str, Any]:
@@ -150,7 +212,10 @@ def summarize_competence(manifest: dict[str, Any]) -> dict[str, Any]:
         and all(results[task]["training_complete"] for task in TASKS)
         and all(results[task]["evaluation_complete"] for task in TASKS)
     )
+    protocol_valid = _protocol_complete(manifest)
+    complete = bool(complete and protocol_valid is not False)
     return {
+        "protocol_valid": protocol_valid,
         "metadata_valid": bool(metadata_valid and rows_valid and no_duplicate_rows),
         "per_task": results,
         "shared_initial_actor_hash_valid": shared_hash,
@@ -271,9 +336,6 @@ def _run(args: argparse.Namespace, *, budget: RunDeadline | None = None) -> int:
 def _execute(args: argparse.Namespace, budget: RunDeadline, manifest: dict[str, Any]) -> None:
     import torch
 
-    sac_module = importlib.import_module("stable_baselines3")
-    SAC = sac_module.SAC
-
     if args.device == "cuda" and not torch.cuda.is_available():
         raise ValueError("CUDA requested but unavailable")
     device = (
@@ -304,6 +366,7 @@ def _execute(args: argparse.Namespace, budget: RunDeadline, manifest: dict[str, 
                     "metaworld_geometry.py",
                     "metaworld_hour_pilot.py",
                     "metaworld_deadlines.py",
+                    "metaworld_protocol.py",
                 )
             },
             "software": {
@@ -323,13 +386,18 @@ def _execute(args: argparse.Namespace, budget: RunDeadline, manifest: dict[str, 
             },
             "seed": args.seed,
             "seed_convention": {
-                "reference_actor_torch": "seed",
-                "training_environment_and_sac": "seed + 1000 + task_index*100",
-                "evaluation_episode_reset": "seed + 100000 + task_index*1000 + episode",
-                "critic_and_environment_randomness": (
-                    "task-specific; actor state copied after SAC construction"
+                "actor": "explicit shared actor seed; copied after critic construction",
+                "source_streams": (
+                    "SeedStreams.from_seed(seed + 1000 + task_index*100, actor_seed=seed)"
                 ),
+                "evaluation_streams": "SeedStreams.from_seed(seed + 90000 + task_index)",
+                "goal_banks": "source/development split-derived streams; serialized exact payloads",
+                "forwarded_reset_seeds": "recorded only; protocol episode stream is authoritative",
             },
+            "protocol_schema_version": SCHEMA_VERSION,
+            "goal_manifests": {},
+            "evaluation_protocol_validation": {},
+            "evaluation_plans": {},
             "tasks": list(TASKS),
             "algorithm": {
                 "policy": "MlpPolicy",
@@ -345,11 +413,7 @@ def _execute(args: argparse.Namespace, budget: RunDeadline, manifest: dict[str, 
                 "ent_coef": "auto",
             },
             "environment": {
-                "observation_dimensions": 39,
-                "action_dimensions": 4,
-                "max_episode_steps": 500,
-                "visible_goal_indices": [36, 37, 38],
-                "task_reward": "Meta-World v3 task reward",
+                **ENVIRONMENT_CONTRACT,
                 "observation_adapter": "goal bounds metadata corrected; observations unchanged",
             },
             "steps_per_policy_requested": args.steps_per_policy,
@@ -364,29 +428,52 @@ def _execute(args: argparse.Namespace, budget: RunDeadline, manifest: dict[str, 
     )
     manifest_path = output / "competence_manifest.json"
     _atomic_json(manifest_path, manifest)
+    goal_manifests: dict[str, GoalManifest] = {}
+
+    def goals_for_task(task_index: int) -> GoalManifest:
+        task = TASKS[task_index]
+        if task not in goal_manifests:
+            budget.require("goal_bank_initialization")
+            streams = SeedStreams.from_seed(
+                args.seed + 1000 + task_index * 100, actor_seed=args.seed
+            )
+            source = generate_goal_bank(task, streams, split="source")
+            budget.require("development_goal_bank_initialization")
+            development = generate_goal_bank(task, streams, split="development")
+            goals = GoalManifest((source, development))
+            goal_manifests[task] = goals
+            manifest["goal_manifests"][task] = goals.to_dict()
+            _atomic_json(manifest_path, manifest)
+        return goal_manifests[task]
+
+    model_options = {
+        "device": device,
+        "policy_kwargs": {"net_arch": [256, 256]},
+        "verbose": 0,
+        "buffer_size": 50_000,
+        "learning_starts": min(1000, args.steps_per_policy),
+        "learning_rate": 3e-4,
+        "gamma": 0.99,
+        "tau": 0.005,
+        "ent_coef": "auto",
+        "batch_size": 256,
+        "train_freq": 1,
+        "gradient_steps": 1,
+    }
     reference_env = env = evaluation_env = None
     try:
         budget.require("reference_environment_initialization")
-        reference_env = make_env(TASKS[0], args.seed + 1, budget=budget)
-        budget.require("reference_model_initialization")
-        torch.manual_seed(args.seed)
-        reference = SAC(
-            "MlpPolicy",
-            reference_env,
-            seed=args.seed,
-            device=device,
-            policy_kwargs={"net_arch": [256, 256]},
-            verbose=0,
-            buffer_size=50_000,
-            learning_starts=min(1000, args.steps_per_policy),
-            learning_rate=3e-4,
-            gamma=0.99,
-            tau=0.005,
-            ent_coef="auto",
-            batch_size=256,
-            train_freq=1,
-            gradient_steps=1,
+        reference_streams = SeedStreams.from_seed(args.seed + 1000, actor_seed=args.seed)
+        reference_goals = goals_for_task(0)
+        reference_env = make_env(
+            TASKS[0],
+            args.seed + 1000,
+            bank=reference_goals.for_fitting()[0],
+            streams=reference_streams,
+            budget=budget,
         )
+        budget.require("reference_model_initialization")
+        reference, _ = build_seeded_sac(reference_env, reference_streams, **model_options)
         budget.require("reference_model_ready")
         shared_actor_state = {
             k: v.detach().clone() for k, v in reference.policy.actor.state_dict().items()
@@ -418,27 +505,13 @@ def _execute(args: argparse.Namespace, budget: RunDeadline, manifest: dict[str, 
                 manifest["task_runs"].append({"task": task, "status": "SKIPPED_TRAINING_BUDGET"})
                 continue
             env_seed = args.seed + 1000 + task_index * 100
-            torch.manual_seed(env_seed)
-            np.random.seed(env_seed)
-            env = make_env(task, env_seed, budget=budget)
-            budget.require("source_model_initialization")
-            model = SAC(
-                "MlpPolicy",
-                env,
-                seed=env_seed,
-                device=device,
-                policy_kwargs={"net_arch": [256, 256]},
-                verbose=0,
-                buffer_size=50_000,
-                learning_starts=min(1000, args.steps_per_policy),
-                learning_rate=3e-4,
-                gamma=0.99,
-                tau=0.005,
-                ent_coef="auto",
-                batch_size=256,
-                train_freq=1,
-                gradient_steps=1,
+            streams = SeedStreams.from_seed(env_seed, actor_seed=args.seed)
+            goals = goals_for_task(task_index)
+            env = make_env(
+                task, env_seed, bank=goals.for_fitting()[0], streams=streams, budget=budget
             )
+            budget.require("source_model_initialization")
+            model, initialization = build_seeded_sac(env, streams, **model_options)
             model.policy.actor.load_state_dict(shared_actor_state, strict=True)
             initial_hash = hash_actor(model.policy.actor)
             callback = DeadlineCallback(budget, reserve_seconds=reserve)
@@ -463,9 +536,12 @@ def _execute(args: argparse.Namespace, budget: RunDeadline, manifest: dict[str, 
             record = {
                 "task": task,
                 "status": "TRAINED" if steps == args.steps_per_policy else "TRAINING_INCOMPLETE",
-                "environment_seed": env_seed,
-                "training_seed": env_seed,
-                "initialization_seed": args.seed,
+                "stream_namespace_seed": env_seed,
+                "environment_seed": streams.constructor,
+                "critic_seed": streams.critic,
+                "training_seed": streams.training,
+                "initialization_seed": streams.actor,
+                "initialization_recipe": initialization,
                 "initial_actor_sha256": initial_hash,
                 "final_actor_sha256": hash_actor(model.policy.actor),
                 "steps_requested": args.steps_per_policy,
@@ -478,6 +554,10 @@ def _execute(args: argparse.Namespace, budget: RunDeadline, manifest: dict[str, 
                 "stopped_for_budget": callback.stopped_for_budget
                 or budget.cutoff_reason is not None,
                 "training_cutoff_reason": callback.cutoff_reason or budget.cutoff_reason,
+                "training_split": "source",
+                "training_goal_bank_sha256": goals.for_fitting()[0].sha256,
+                "goal_manifest_sha256": goals.sha256,
+                "environment_protocol": env.get_wrapper_attr("protocol_manifest")(),
             }
             manifest["task_runs"].append(record)
             _atomic_json(manifest_path, manifest)
@@ -489,7 +569,26 @@ def _execute(args: argparse.Namespace, budget: RunDeadline, manifest: dict[str, 
 
             rows: list[dict[str, Any]] = []
             budget.require("evaluation_initialization")
-            evaluation_env = make_env(task, args.seed + 90000 + task_index, budget=budget)
+            evaluation_bank = goals.for_tuning()[0]
+            order = evaluation_order(evaluation_bank, args.evaluation_episodes)
+            evaluation_seed = args.seed + 90000 + task_index
+            evaluation_streams = SeedStreams.from_seed(evaluation_seed)
+            evaluation_env = make_env(
+                task,
+                evaluation_seed,
+                bank=evaluation_bank,
+                streams=evaluation_streams,
+                goal_order=order,
+                budget=budget,
+            )
+            manifest["evaluation_protocol_validation"][task] = False
+            manifest["evaluation_plans"][task] = {
+                "goal_bank_sha256": evaluation_bank.sha256,
+                "goal_order": list(order),
+                "goal_ids": [evaluation_bank.goals[index].goal_id for index in order],
+                "rng_streams": asdict(evaluation_streams),
+            }
+            _atomic_json(manifest_path, manifest)
             try:
                 for episode in range(args.evaluation_episodes):
                     if not budget.allowed("evaluation_episode"):
@@ -527,6 +626,7 @@ def _execute(args: argparse.Namespace, budget: RunDeadline, manifest: dict[str, 
                             "length": length,
                             "complete_episode": bool(terminated or truncated),
                             "cutoff_reason": budget.cutoff_reason,
+                            **evaluation_record(evaluation_env),
                         }
                     )
                     manifest["evaluations"].extend(rows[-1:])
@@ -539,6 +639,11 @@ def _execute(args: argparse.Namespace, budget: RunDeadline, manifest: dict[str, 
                     )
                     if not budget.allowed("evaluation_episode"):
                         break
+                if len(rows) == args.evaluation_episodes and all(
+                    row["complete_episode"] for row in rows
+                ):
+                    validate_evaluation_coverage(rows, evaluation_bank, order)
+                    manifest["evaluation_protocol_validation"][task] = True
             finally:
                 evaluation_env.close()
                 env.close()

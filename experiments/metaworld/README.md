@@ -1,15 +1,16 @@
-# One hour Meta World feasibility pilot
+# Meta-World experimental runtime and historical pilots
 
-This isolated project supports the approved 18 source policy runs: reach, push and pick place; three independent library replicates; shared and independent actor initialization. Meta-World 3.1.1 requires Gymnasium 1.1 or newer and MuJoCo 3.3.0. Stable-Baselines3 2.6.0 is pinned because its changelog adds Gymnasium 1.1 support; 2.5.0 is incompatible with this benchmark release.
+This isolated project was introduced for the historical 18-source-policy pilot: reach, push and pick-place; three independent library replicates; shared and independent actor initialization. Those counts and the spent one-hour allowances are historical, not a standing allocation for new runs. Meta-World 3.1.1 requires Gymnasium 1.1 or newer and MuJoCo 3.3.0. Stable-Baselines3 2.6.0 is pinned because its changelog adds Gymnasium 1.1 support; 2.5.0 is incompatible with this benchmark release.
 
-This pilot tests setup, competence and preliminary functional reuse within a one-hour local-use cap. It is exploratory. A partial or undertrained population cannot establish transfer or novelty. The first 25,000-step reach run is a throughput calibration, stored separately and excluded from the balanced cohort. The balanced cohort targets 4,000 environment steps per policy, with one evaluation episode per task; this shortened budget was chosen after measuring runtime and is not a confirmation test.
+The [accepted scope](https://github.com/Spiph/UWSH-nethack/issues/31) uses custom visible-goal Meta-World experiments for held-out task-family adaptation, with within-family goal transfer as a diagnostic and a focused MiniHack replication. Local development and costing precede campaign sizing. No numerical training or calibration allocation is currently authorized. The [research roadmap](https://github.com/Spiph/UWSH-nethack/issues/9) is the execution contract; the examples below describe command shapes rather than new run budgets.
 
-The laptop already has Python 3.10 and CUDA enabled PyTorch 2.2.2 in the repository environment. To avoid installing another multi gigabyte CUDA stack, the one time pilot reused that installed PyTorch from an isolated temporary environment. For a standalone reproduction, resolve and install this project's exact dependencies using uv. On this laptop, route the existing PyTorch site packages into the isolated interpreter with `PYTHONPATH` if CUDA is needed.
+The historical pilot tested setup, competence and preliminary functional reuse within a one-hour local-use cap. It is exploratory. A partial or undertrained population cannot establish transfer or novelty. The first 25,000-step reach run is a throughput calibration, stored separately and excluded from the balanced cohort. The balanced cohort targeted 4,000 environment steps per policy, with one evaluation episode per task; this shortened budget was chosen after measuring runtime and is not a confirmation test.
 
-The standalone lock uses Torch 2.3.0 to meet Stable-Baselines3's declared requirement and NumPy 1.26.4 to match the locally validated NumPy version. The original pilot reused Torch 2.2.2 outside that declared dependency range; the complete locked environment still needs its own benchmark smoke check before another training run. The measurement-only commands below use the existing repository environment.
+The original pilot reused the repository's Python 3.10 and CUDA-enabled PyTorch 2.2.2 through a temporary isolated environment. The supported runtime uses this project's checked-in dependency lock instead. Install it with `uv sync --frozen` and invoke its interpreter with `PYTHONPATH` removed, as shown below.
+
+The standalone lock uses Torch 2.3.0 to meet Stable-Baselines3's declared requirement and NumPy 1.26.4 to match the locally validated NumPy version. The original pilot reused Torch 2.2.2 outside that declared dependency range; the pinned runtime subsequently passed the separate 2026-10-15 mechanics check described below. The corrected task/seed protocol still needs physical MuJoCo validation under a new allocation. The measurement-only commands below use the existing repository environment.
 
 ```bash
-uv lock --project experiments/metaworld
 uv sync --project experiments/metaworld --frozen
 uv run --project experiments/metaworld --frozen python scripts/metaworld_hour_pilot.py \
   --output artifacts/metaworld-one-hour-pilot-r1 \
@@ -61,7 +62,7 @@ env -u PYTHONPATH experiments/metaworld/.venv/bin/python -m scripts.metaworld_co
 
 The second command trains one policy each on reach, push and pick-place using a shared initial actor and separate task-specific critic/environment/training seeds. It saves the shared initial actor, final checkpoints, layouts/hashes and every fresh own-task episode. Each task passes the operational screen only with complete 25,000-step training and at least 16 of 20 successful complete evaluation episodes; the whole screen also requires matching initial actor hashes. A completed screen can fail competence without being a runtime error. A 128-step/one-episode invocation is labeled as smoke data and is kept separate.
 
-This small screen performs no oracle projections or practical adaptation. Its single-library result does not estimate seed variability. The 2026-10-15 launch is authorized for one inclusive local hour; these example commands do not authorize additional compute or another run. Preserve failures and partial outcomes under the global deadline rather than extending it.
+This small screen performs no oracle projections or practical adaptation. Its single-library result does not estimate seed variability. The 2026-10-15 launch was authorized for one inclusive local hour, and that allowance is spent; these example commands do not authorize additional compute or another run. Preserve failures and partial outcomes under the global deadline rather than extending it.
 
 ## Executable session deadlines
 
@@ -78,3 +79,25 @@ The regression suite uses injected clocks, inert runtime modules and fake enviro
 ```bash
 python -m pytest tests/test_metaworld_deadlines.py tests/test_metaworld_competence.py
 ```
+
+## Reproducible task and goal protocol for new runs
+
+The historical runs above used the upstream task selector and nominal reset seeds. Meta-World 3.1.1 ignores `reset(seed=...)`; those fields do not establish paired goal sequences. SAC also seeds model construction itself, overriding an earlier `torch.manual_seed`. Preserve the old artifacts as exploratory evidence with these limitations. The corrected implementation is tracked in [task sampling and evaluation reproducibility](https://github.com/Spiph/UWSH-nethack/issues/32).
+
+`scripts/metaworld_protocol.py` pins V2 rewards independently of the `-v3` task suffix, visible 39-dimensional observations, four actions in `[-1,1]`, and full 500-step episodes. Evaluation records any-time success, continues after success, and rejects partial episodes from complete coverage. The observation-bounds adapter remains unchanged. SAC replay explicitly bootstraps at time-limit truncations; it preserves terminal observations through SB3's vector adapter.
+
+`SeedStreams.from_seed` derives separate constructor, task-bank, selection, episode, action, actor, critic and training streams. Split-specific bank seeds generate source and development configurations independently. Exact upstream task payloads, random configuration vectors, hashes, declared evaluation order and realized episode seeds/order are serialized. The controlled wrapper isolates legacy NumPy/Python draws and uses independent local task-selection and episode generators. It is a synchronous adapter; arbitrary concurrent code that mutates global RNGs is outside its contract. Forwarded reset seeds, including SB3's automatic seeds, are recorded but cannot replace these explicit streams. Reconstruct an environment from its saved bank/streams to replay it. Environment creation returns without consuming a reset or the first planned evaluation goal.
+
+`GoalManifest` declares either development-only use, within-family held-out configurations, or held-out-family transfer. It rejects duplicated configurations across splits, enforces the chosen family exclusion rule, and provides source-only fitting and development-only tuning views. Weight-provenance validation checks both task class and the source training bank, including target-trained actors from a known class. Final-test banks require an explicit final-test regime and are not generated by the exploratory pilot. Task payloads use upstream pickle encoding and are trusted local experiment artifacts.
+
+New hour-pilot runs cache source/development banks per library and task, pair development evaluation goals across arms, save initial actor arrays and effective actor/critic hashes, and record full RNG recipes. The actor is explicitly regenerated and copied after critic-seeded SAC construction; the training seed is applied afterward. This changes future reproduction behavior without rewriting past cohorts. Competence-screen integration uses the same helper; runtime rollout validation and any new calibration require a separately recorded allocation.
+
+Dependency-light validation uses fake environments and fake SAC construction, including separate-process replay, split leakage, RNG independence, complete goal coverage and timeout handling:
+
+```bash
+python -m pytest tests/test_metaworld_protocol.py
+```
+
+These tests and source inspection do not constitute a new MuJoCo rollout validation or approve training.
+
+The optional `test_metaworld_protocol_runtime.py` checks actual SAC construction and replay storage using synthetic Gymnasium spaces, with zero environment resets/steps and no learning. Run it with the existing isolated interpreter using `python -m unittest discover -s tests -p test_metaworld_protocol_runtime.py -v`. It checks actor/critic seed separation, optimizer parameter references, time-limit bootstrapping and storage of the terminal observation instead of an autoreset observation. Ordinary development pytest skips these two tests when SB3 is absent.
