@@ -405,6 +405,19 @@ class BasisArtifact:
     def reference(self) -> Array:
         return self._arrays["reference"].copy()
 
+    def deployment_arrays(self) -> dict[str, Array]:
+        """Copy the exact deployed reference/map without research-only arrays."""
+        keys = ["reference", *self._metadata["deployment_basis_keys"]]
+        return {key: self._arrays[key].copy() for key in keys}
+
+    @property
+    def parameterization(self) -> str:
+        return "flat" if self._metadata["estimator"] == "flat_population_pca" else "parameter_modes"
+
+    def validate_integrity(self) -> None:
+        """Recheck public consumer preconditions without exposing private arrays."""
+        self._validate()
+
     @property
     def coefficient_count(self) -> int:
         return int(self._metadata["coefficient_count"])

@@ -24,7 +24,7 @@ All uncompressed dimensions remain coefficients, including complete bias/head te
 
 Both estimators support final weights or deltas from **one stored common base**. Per-initialization deltas are rejected as a deployable family. With elementwise population centering, common-base subtraction cancels algebraically in flat PCA, up to numerical roundoff; it is bookkeeping rather than a separate initialization intervention. Parameter-mode feature centering can retain other base components, so that identity does not automatically extend to HOSVD.
 
-The deployed reference is either the actual estimator center or an exact retained source actor. Choosing a source anchor can translate a truncated centered affine family; it is not promised to be a coordinate change of the original centered family. Zero coefficients reproduce the stored reference exactly. `BasisArtifact.decode` is the sole coefficient-to-policy map used by the separately labeled `oracle_project` diagnostic and future practical adaptation. Oracle target weights do not update the artifact.
+The deployed reference is either the actual estimator center or an exact retained source actor. Choosing a source anchor can translate a truncated centered affine family; it is not promised to be a coordinate change of the original centered family. Zero coefficients reproduce the stored reference exactly. `BasisArtifact.decode` and its separately labeled `oracle_project` diagnostic use the original float64 coordinate map. Oracle target weights do not update the artifact.
 
 ## Alignment, persistence and costs
 
@@ -36,8 +36,18 @@ The storage report distinguishes all persisted research arrays from the shared d
 
 `family_sha256` identifies the **exact stored reference and coefficient map**. Unequal identifiers do not prove that two parameterizations span different affine spaces. Matching identifiers let oracle and practical consumers verify that they use the same map.
 
+## Differentiable coefficients and execution precision
+
+`AffineCoefficientActor` in `scripts.metaworld_affine_actor` consumes the public `AffineFamily` interface and copied deployment arrays. Its only trainable parameter is the complete coefficient vector. The stored reference and flat directions or parameter factors are frozen buffers. It evaluates both raw SAC heads through the exact ordered two-hidden-layer layout and explicit ReLU or Tanh activation. The SAC adapter owns log-standard-deviation clamping, the Gaussian distribution, tanh and log probabilities.
+
+Construction requires explicit float64 or float32 precision. The actor records the original artifact/family hashes and a separate hash of the actual materialized coordinate map. A float32 materialization preserves the declared construction while rounding its numerical map; it is not bit-identical to the original float64 family. Device moves are supported, while subsequent dtype changes fail before mutation. Reload requires the verified external family and checks origin, activation, dtype and all frozen buffer bytes before updating coefficients. Full checkpoints contain the shared map; reported per-target coefficient bytes are not their total size.
+
+`actor.export_executed_map()` copies the actual buffers and binds their layout, coefficient accounting and provenance with content hashes. A float32 execution must use this descriptor for oracle comparisons. The separate NumPy-only `privileged_oracle_project_executed_map` diagnostic solves least squares in float64 against those actual stored values, using per-mode pseudoinverses for parameter factors rather than assuming rounded factors remain orthonormal. It returns explicitly privileged coefficients and reconstruction bound to the executed-map hash. These coordinates never enter the learning constructor. Coefficients are then cast to execution precision; that rounding can increase residuals, and NumPy/Torch reduction order can produce small reconstruction differences. The diagnostic reports the float64 optimum and materialized residual separately.
+
+Synthetic tests cover both estimators, both heads, finite-difference gradients, frozen buffers after a coefficient optimizer step, dtype/serialization conflicts, rank-zero maps and executed-map oracle parity. These checks establish code behavior only; no target smoke experiment, real policy fitting or environment rollout is part of this implementation.
+
 Focused synthetic verification:
 
 ```bash
-PYTHONPATH=src python -m pytest tests/test_metaworld_basis.py
+PYTHONPATH=src python -m pytest tests/test_metaworld_basis.py tests/test_metaworld_affine_actor.py
 ```
