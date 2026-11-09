@@ -2,7 +2,7 @@
 
 This isolated project was introduced for the historical 18-source-policy pilot: reach, push and pick-place; three independent library replicates; shared and independent actor initialization. Those counts and the spent one-hour allowances are historical, not a standing allocation for new runs. Meta-World 3.1.1 requires Gymnasium 1.1 or newer and MuJoCo 3.3.0. Stable-Baselines3 2.6.0 is pinned because its changelog adds Gymnasium 1.1 support; 2.5.0 is incompatible with this benchmark release.
 
-The [accepted scope](https://github.com/Spiph/UWSH-nethack/issues/31) uses custom visible-goal Meta-World experiments for held-out task-family adaptation, with within-family goal transfer as a diagnostic and a focused MiniHack replication. Local development and costing precede campaign sizing. No numerical training or calibration allocation is currently authorized. The [research roadmap](https://github.com/Spiph/UWSH-nethack/issues/9) is the execution contract; the examples below describe command shapes rather than new run budgets.
+The [accepted scope](https://github.com/Spiph/UWSH-nethack/issues/31) uses custom visible-goal Meta-World experiments for held-out task-family adaptation, with within-family goal transfer as a diagnostic and a focused MiniHack replication. Local development and costing precede campaign sizing. The user approved one [six-hour local source-development allocation](https://github.com/Spiph/UWSH-nethack/issues/37#issuecomment-6744153267) on 2026-11-09; it supplies no target-adaptation, final-test or confirmation budget. The [research roadmap](https://github.com/Spiph/UWSH-nethack/issues/9) is the execution contract; the examples below describe command shapes rather than new run budgets.
 
 The historical pilot tested setup, competence and preliminary functional reuse within a one-hour local-use cap. It is exploratory. A partial or undertrained population cannot establish transfer or novelty. The first 25,000-step reach run is a throughput calibration, stored separately and excluded from the balanced cohort. The balanced cohort targeted 4,000 environment steps per policy, with one evaluation episode per task; this shortened budget was chosen after measuring runtime and is not a confirmation test.
 
@@ -108,3 +108,19 @@ Optional pinned-runtime checks verify actual SB3 model-seed separation and repla
 env -u PYTHONPATH experiments/metaworld/.venv/bin/python -m unittest discover \
   -s tests -p test_metaworld_protocol_runtime.py -v
 ```
+
+
+## Approved staged development plan — 2026-11-09
+
+[development_2026-11-09.json](development_2026-11-09.json) freezes the approved six-hour option: one sequential local CUDA process; the existing three tasks; cumulative round-robin checkpoints at 100k and 250k steps; at most three source-policy starts and zero retries. A task stops at its earliest checkpoint with at least 16 successes in all twenty complete 500-step episodes on fixed development configurations. The same learner, optimizer and replay continue between milestones. The worst-case ledger is 750,000 training +60,000 development evaluation +1,000 preflight agent-facing transitions =811,000, with zero target/final-test transitions and a 2 GiB new-artifact cap.
+
+The fixed inclusive session is **2026-11-09 15:35–21:35 UTC**; implementation, preparation and checks count against it. No further training starts after **21:05 UTC**, leaving thirty minutes for evaluation/retention. The 900-second preflight phase cap begins when runtime preflight starts; it does not reset or extend the six-hour session. Unused time does not authorize another option, task, seed, sweep or adaptation run.
+
+The pure standard-library validator checks the exact approved settings and prints the schedule, worst-case ledger, historical training-cost projection and configuration hash without importing NumPy, Torch or the environment:
+
+```bash
+python -S -m scripts.metaworld_development_plan \
+  --config experiments/metaworld/development_2026-11-09.json
+```
+
+Every source/development `SeedStreams` field is materialized as an integer in the configuration. The effective bank seed is `derive_seed(task_bank, split)`; its resolved value is also stored. Source fitting sees fifty configurations; checkpoint selection sees twenty disjoint development configurations in a fixed order. Final-test goals are not generated. The executable launch still verifies the frozen approval/configuration hash and live cutoff before importing its runtime. Structural validation remains available after the allocation expires, and does not renew it.
