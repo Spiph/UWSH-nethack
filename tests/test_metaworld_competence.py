@@ -140,7 +140,15 @@ def test_unknown_task_run_cannot_pass() -> None:
 )
 def test_invalid_budgets_are_rejected(options: list[str], tmp_path: Path) -> None:
     with pytest.raises(SystemExit):
-        parse_args(["--output", str(tmp_path / "new-run"), *options])
+        parse_args(
+            [
+                "--output",
+                str(tmp_path / "new-run"),
+                "--deadline-utc",
+                "2030-01-01T00:00:00Z",
+                *options,
+            ]
+        )
 
 
 def test_output_with_existing_contents_is_preserved(tmp_path: Path) -> None:
@@ -149,13 +157,22 @@ def test_output_with_existing_contents_is_preserved(tmp_path: Path) -> None:
     sentinel = output / "keep.txt"
     sentinel.write_text("user data", encoding="utf-8")
     with pytest.raises(SystemExit):
-        parse_args(["--output", str(output)])
+        parse_args(["--output", str(output), "--deadline-utc", "2030-01-01T00:00:00Z"])
     assert sentinel.read_text(encoding="utf-8") == "user data"
 
 
 def test_smoke_configuration_is_explicitly_small() -> None:
     args = parse_args(
-        ["--output", "unused", "--steps-per-policy", "128", "--evaluation-episodes", "1"]
+        [
+            "--output",
+            "unused",
+            "--deadline-utc",
+            "2030-01-01T00:00:00Z",
+            "--steps-per-policy",
+            "128",
+            "--evaluation-episodes",
+            "1",
+        ]
     )
     assert args.steps_per_policy == 128
     assert args.evaluation_episodes == 1

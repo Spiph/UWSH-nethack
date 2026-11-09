@@ -8,15 +8,15 @@ import hashlib
 import importlib
 import json
 import platform
-import time
 import traceback
 from collections.abc import Sequence
-from datetime import datetime, timezone
 from importlib.metadata import PackageNotFoundError, version
 from pathlib import Path
 from typing import Any, cast
 
 import numpy as np
+
+from scripts.metaworld_deadlines import BudgetExpired, RunDeadline, guard_model, parse_deadline
 
 TASKS = ("reach-v3", "push-v3", "pick-place-v3")
 BASE_SEED = 20261015
@@ -25,6 +25,7 @@ BASE_SEED = 20261015
 def parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--deadline-utc", type=parse_deadline, required=True)
     parser.add_argument("--seconds", type=int, default=3600)
     parser.add_argument("--steps-per-policy", type=int, default=25_000)
     parser.add_argument("--evaluation-episodes", type=int, default=20)
@@ -205,7 +206,69 @@ def _runtime_package_hashes() -> dict[str, str | None]:
     return result
 
 
-def _run(args: argparse.Namespace) -> int:
+def _run(args: argparse.Namespace, *, budget: RunDeadline | None = None) -> int:
+    # Start and persist clocks before importing or initializing the RL runtime.
+    budget = budget or RunDeadline(args.seconds, args.deadline_utc)
+    output: Path = args.output
+    output.mkdir(parents=True, exist_ok=True)
+    manifest: dict[str, Any] = {
+        "status": "RUNNING",
+        "tasks": list(TASKS),
+        "steps_per_policy_requested": args.steps_per_policy,
+        "evaluation_episodes_requested": args.evaluation_episodes,
+        "runner_seconds": args.seconds,
+        "task_runs": [],
+        "evaluations": [],
+        "errors": [],
+    }
+    path = output / "competence_manifest.json"
+    budget.record(manifest)
+    _atomic_json(path, manifest)
+    try:
+        budget.require("runtime_initialization")
+        _execute(args, budget, manifest)
+    except BudgetExpired:
+        manifest["status"] = "STOPPED_AT_BUDGET"
+    except Exception as error:
+        manifest["status"] = "ERROR"
+        manifest["errors"].append(f"{type(error).__name__}: {error}")
+        manifest["traceback"] = traceback.format_exc()
+        raise
+    finally:
+        budget.record(manifest)
+        summary = summarize_competence(manifest)
+        manifest["competence"] = summary
+        manifest["incomplete_tasks"] = [
+            task
+            for task, row in summary["per_task"].items()
+            if not row["training_complete"] or not row["evaluation_complete"]
+        ]
+        manifest["missing_evaluation_episodes"] = {
+            task: [
+                episode
+                for episode in range(args.evaluation_episodes)
+                if not any(
+                    row.get("task") == task
+                    and row.get("episode") == episode
+                    and row.get("complete_episode") is True
+                    for row in manifest["evaluations"]
+                )
+            ]
+            for task in TASKS
+        }
+        budget.record(manifest)
+        manifest["validation_complete"] = bool(
+            summary["all_tasks_complete"]
+            and summary["shared_initial_actor_hash_valid"]
+            and manifest["budget_compliant"]
+            and manifest["status"] in ("COMPLETE_PASS", "COMPLETE_FAIL")
+        )
+        _atomic_json(path, manifest)
+    print(json.dumps(manifest["competence"], indent=2))
+    return 0 if manifest.get("status") == "COMPLETE_PASS" else 2
+
+
+def _execute(args: argparse.Namespace, budget: RunDeadline, manifest: dict[str, Any]) -> None:
     import torch
 
     sac_module = importlib.import_module("stable_baselines3")
@@ -226,81 +289,86 @@ def _run(args: argparse.Namespace) -> int:
     make_env = pilot.make_env
 
     output: Path = args.output
-    output.mkdir(parents=True, exist_ok=True)
-    started = time.monotonic()
-    deadline = started + args.seconds
-    manifest: dict[str, Any] = {
-        "status": "RUNNING",
-        "purpose": "small-run Meta-World competence screen",
-        "mode": "smoke"
-        if args.steps_per_policy == 128 and args.evaluation_episodes == 1
-        else "competence_screen",
-        "started_at_utc": datetime.now(timezone.utc).isoformat(),
-        "runner_sha256": _sha256(Path(__file__)),
-        "measurement_code_sha256": {
-            name: _sha256(Path(__file__).with_name(name))
-            for name in ("metaworld_geometry.py", "metaworld_hour_pilot.py")
-        },
-        "software": {
-            "python": platform.python_version(),
-            "numpy": np.__version__,
-            "torch": torch.__version__,
-            "gymnasium": _package_version("gymnasium"),
-            "mujoco": _package_version("mujoco"),
-            "stable_baselines3": _package_version("stable-baselines3"),
-            "metaworld": _package_version("metaworld"),
-            "package_entrypoint_sha256": _runtime_package_hashes(),
-        },
-        "hardware": {
-            "platform": platform.platform(),
-            "device": device,
-            "gpu": torch.cuda.get_device_name(0) if device == "cuda" else None,
-        },
-        "seed": args.seed,
-        "seed_convention": {
-            "reference_actor_torch": "seed",
-            "training_environment_and_sac": "seed + 1000 + task_index*100",
-            "evaluation_episode_reset": "seed + 100000 + task_index*1000 + episode",
-            "critic_and_environment_randomness": (
-                "task-specific; actor state copied after SAC construction"
-            ),
-        },
-        "tasks": list(TASKS),
-        "algorithm": {
-            "policy": "MlpPolicy",
-            "net_arch": [256, 256],
-            "learning_rate": 3e-4,
-            "gamma": 0.99,
-            "tau": 0.005,
-            "learning_starts": min(1000, args.steps_per_policy),
-            "buffer_size": 50_000,
-            "batch_size": 256,
-            "train_freq": 1,
-            "gradient_steps": 1,
-            "ent_coef": "auto",
-        },
-        "environment": {
-            "observation_dimensions": 39,
-            "action_dimensions": 4,
-            "max_episode_steps": 500,
-            "visible_goal_indices": [36, 37, 38],
-            "task_reward": "Meta-World v3 task reward",
-            "observation_adapter": "goal bounds metadata corrected; observations unchanged",
-        },
-        "steps_per_policy_requested": args.steps_per_policy,
-        "evaluation_episodes_requested": args.evaluation_episodes,
-        "success_threshold": int(np.ceil(0.8 * args.evaluation_episodes)),
-        "reserve_seconds": args.reserve_seconds,
-        "runner_seconds": args.seconds,
-        "task_runs": [],
-        "evaluations": [],
-        "errors": [],
-    }
+    budget.require("runtime_ready")
+    manifest.update(
+        {
+            "status": "RUNNING",
+            "purpose": "small-run Meta-World competence screen",
+            "mode": "smoke"
+            if args.steps_per_policy == 128 and args.evaluation_episodes == 1
+            else "competence_screen",
+            "runner_sha256": _sha256(Path(__file__)),
+            "measurement_code_sha256": {
+                name: _sha256(Path(__file__).with_name(name))
+                for name in (
+                    "metaworld_geometry.py",
+                    "metaworld_hour_pilot.py",
+                    "metaworld_deadlines.py",
+                )
+            },
+            "software": {
+                "python": platform.python_version(),
+                "numpy": np.__version__,
+                "torch": torch.__version__,
+                "gymnasium": _package_version("gymnasium"),
+                "mujoco": _package_version("mujoco"),
+                "stable_baselines3": _package_version("stable-baselines3"),
+                "metaworld": _package_version("metaworld"),
+                "package_entrypoint_sha256": _runtime_package_hashes(),
+            },
+            "hardware": {
+                "platform": platform.platform(),
+                "device": device,
+                "gpu": torch.cuda.get_device_name(0) if device == "cuda" else None,
+            },
+            "seed": args.seed,
+            "seed_convention": {
+                "reference_actor_torch": "seed",
+                "training_environment_and_sac": "seed + 1000 + task_index*100",
+                "evaluation_episode_reset": "seed + 100000 + task_index*1000 + episode",
+                "critic_and_environment_randomness": (
+                    "task-specific; actor state copied after SAC construction"
+                ),
+            },
+            "tasks": list(TASKS),
+            "algorithm": {
+                "policy": "MlpPolicy",
+                "net_arch": [256, 256],
+                "learning_rate": 3e-4,
+                "gamma": 0.99,
+                "tau": 0.005,
+                "learning_starts": min(1000, args.steps_per_policy),
+                "buffer_size": 50_000,
+                "batch_size": 256,
+                "train_freq": 1,
+                "gradient_steps": 1,
+                "ent_coef": "auto",
+            },
+            "environment": {
+                "observation_dimensions": 39,
+                "action_dimensions": 4,
+                "max_episode_steps": 500,
+                "visible_goal_indices": [36, 37, 38],
+                "task_reward": "Meta-World v3 task reward",
+                "observation_adapter": "goal bounds metadata corrected; observations unchanged",
+            },
+            "steps_per_policy_requested": args.steps_per_policy,
+            "evaluation_episodes_requested": args.evaluation_episodes,
+            "success_threshold": int(np.ceil(0.8 * args.evaluation_episodes)),
+            "reserve_seconds": args.reserve_seconds,
+            "runner_seconds": args.seconds,
+            "task_runs": [],
+            "evaluations": [],
+            "errors": [],
+        }
+    )
     manifest_path = output / "competence_manifest.json"
     _atomic_json(manifest_path, manifest)
-    reference_env = None
+    reference_env = env = evaluation_env = None
     try:
-        reference_env = make_env(TASKS[0], args.seed + 1)
+        budget.require("reference_environment_initialization")
+        reference_env = make_env(TASKS[0], args.seed + 1, budget=budget)
+        budget.require("reference_model_initialization")
         torch.manual_seed(args.seed)
         reference = SAC(
             "MlpPolicy",
@@ -319,6 +387,7 @@ def _run(args: argparse.Namespace) -> int:
             train_freq=1,
             gradient_steps=1,
         )
+        budget.require("reference_model_ready")
         shared_actor_state = {
             k: v.detach().clone() for k, v in reference.policy.actor.state_dict().items()
         }
@@ -344,13 +413,15 @@ def _run(args: argparse.Namespace) -> int:
         policy_dir.mkdir(exist_ok=True)
         for task_index, task in enumerate(TASKS):
             remaining = len(TASKS) - task_index
-            if time.monotonic() >= deadline - args.reserve_seconds * remaining / len(TASKS):
+            reserve = args.reserve_seconds * remaining / len(TASKS)
+            if not budget.allowed("training_initialization", reserve_seconds=reserve):
                 manifest["task_runs"].append({"task": task, "status": "SKIPPED_TRAINING_BUDGET"})
                 continue
             env_seed = args.seed + 1000 + task_index * 100
             torch.manual_seed(env_seed)
             np.random.seed(env_seed)
-            env = make_env(task, env_seed)
+            env = make_env(task, env_seed, budget=budget)
+            budget.require("source_model_initialization")
             model = SAC(
                 "MlpPolicy",
                 env,
@@ -370,12 +441,18 @@ def _run(args: argparse.Namespace) -> int:
             )
             model.policy.actor.load_state_dict(shared_actor_state, strict=True)
             initial_hash = hash_actor(model.policy.actor)
-            callback = DeadlineCallback(deadline - args.reserve_seconds * remaining / len(TASKS))
+            callback = DeadlineCallback(budget, reserve_seconds=reserve)
             before_steps = int(model.num_timesteps)
-            train_started = time.monotonic()
-            model.learn(args.steps_per_policy, callback=callback, progress_bar=False)
+            train_started = budget.monotonic()
+            try:
+                with guard_model(model, budget):
+                    if budget.allowed("training_start", reserve_seconds=reserve):
+                        model.learn(args.steps_per_policy, callback=callback, progress_bar=False)
+            except BudgetExpired:
+                pass  # Retain partial training before handling the global cutoff.
+            budget.allowed("training_return")
             steps = int(model.num_timesteps - before_steps)
-            train_duration = time.monotonic() - train_started
+            train_duration = budget.monotonic() - train_started
             model_path = policy_dir / task
             model.save(str(model_path))
             vector, layout = actor_vector(model.policy.actor)
@@ -398,6 +475,9 @@ def _run(args: argparse.Namespace) -> int:
                 "model_file": str(model_path.with_suffix(".zip")),
                 "actor_file": str(actor_path),
                 "actor_layout": layout,
+                "stopped_for_budget": callback.stopped_for_budget
+                or budget.cutoff_reason is not None,
+                "training_cutoff_reason": callback.cutoff_reason or budget.cutoff_reason,
             }
             manifest["task_runs"].append(record)
             _atomic_json(manifest_path, manifest)
@@ -408,24 +488,35 @@ def _run(args: argparse.Namespace) -> int:
             )
 
             rows: list[dict[str, Any]] = []
-            evaluation_env = make_env(task, args.seed + 90000 + task_index)
+            budget.require("evaluation_initialization")
+            evaluation_env = make_env(task, args.seed + 90000 + task_index, budget=budget)
             try:
                 for episode in range(args.evaluation_episodes):
-                    if time.monotonic() >= deadline:
+                    if not budget.allowed("evaluation_episode"):
                         break
-                    obs, _ = evaluation_env.reset(
-                        seed=args.seed + 100000 + task_index * 1000 + episode
-                    )
+                    budget.require("evaluation_reset")
+                    try:
+                        obs, _ = evaluation_env.reset(
+                            seed=args.seed + 100000 + task_index * 1000 + episode
+                        )
+                    except BudgetExpired:
+                        break
                     total, max_success, length = 0.0, 0.0, 0
                     terminated = truncated = False
                     while not (terminated or truncated):
-                        if time.monotonic() >= deadline:
+                        if not budget.allowed("evaluation_episode"):
                             break
                         action, _ = model.predict(obs, deterministic=True)
-                        obs, reward, terminated, truncated, info = evaluation_env.step(action)
+                        if not budget.allowed("evaluation_step"):
+                            break
+                        try:
+                            obs, reward, terminated, truncated, info = evaluation_env.step(action)
+                        except BudgetExpired:
+                            break
                         total += float(reward)
                         max_success = max(max_success, float(info.get("success", 0.0)))
                         length += 1
+                    budget.allowed("evaluation_return")
                     rows.append(
                         {
                             "task": task,
@@ -435,6 +526,7 @@ def _run(args: argparse.Namespace) -> int:
                             "success_value": max_success,
                             "length": length,
                             "complete_episode": bool(terminated or truncated),
+                            "cutoff_reason": budget.cutoff_reason,
                         }
                     )
                     manifest["evaluations"].extend(rows[-1:])
@@ -445,33 +537,30 @@ def _run(args: argparse.Namespace) -> int:
                         f"return={total:.3f}, success={rows[-1]['success']}",
                         flush=True,
                     )
-                    if time.monotonic() >= deadline:
+                    if not budget.allowed("evaluation_episode"):
                         break
             finally:
                 evaluation_env.close()
                 env.close()
+                evaluation_env = env = None
             del model
         summary = summarize_competence(manifest)
         manifest["competence"] = summary
-        manifest["elapsed_seconds"] = time.monotonic() - started
-        manifest["finished_at_utc"] = datetime.now(timezone.utc).isoformat()
-        manifest["status"] = (
-            "COMPLETE_PASS"
-            if summary["all_tasks_pass"]
-            else ("COMPLETE_FAIL" if summary["all_tasks_complete"] else "INCOMPLETE")
-        )
-    except Exception as error:
-        manifest["status"] = "ERROR"
-        manifest["errors"].append(f"{type(error).__name__}: {error}")
-        manifest["traceback"] = traceback.format_exc()
-        manifest["elapsed_seconds"] = time.monotonic() - started
-        raise
+        budget.record(manifest)
+        if not budget.allowed("completion"):
+            manifest["status"] = "STOPPED_AT_BUDGET"
+        else:
+            manifest["status"] = (
+                "COMPLETE_PASS"
+                if summary["all_tasks_pass"]
+                else ("COMPLETE_FAIL" if summary["all_tasks_complete"] else "INCOMPLETE")
+            )
     finally:
-        if reference_env is not None:
-            reference_env.close()
+        for resource in (reference_env, evaluation_env, env):
+            if resource is not None:
+                resource.close()
+        budget.record(manifest)
         _atomic_json(manifest_path, manifest)
-    print(json.dumps(manifest.get("competence", summarize_competence(manifest)), indent=2))
-    return 0 if manifest.get("status") == "COMPLETE_PASS" else 2
 
 
 def main(argv: Sequence[str] | None = None) -> int:

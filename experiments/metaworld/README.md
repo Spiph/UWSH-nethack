@@ -12,10 +12,11 @@ The standalone lock uses Torch 2.3.0 to meet Stable-Baselines3's declared requir
 uv lock --project experiments/metaworld
 uv sync --project experiments/metaworld --frozen
 uv run --project experiments/metaworld --frozen python scripts/metaworld_hour_pilot.py \
-  --output artifacts/metaworld-one-hour-pilot-r1
+  --output artifacts/metaworld-one-hour-pilot-r1 \
+  --deadline-utc "${APPROVED_DEADLINE_UTC:?set an approved absolute UTC cutoff}"
 ```
 
-The script accepts a hard runtime budget and reserves time for evaluation. All derived artifacts go under the output directory. It records every planned policy and evaluation, including runs skipped or interrupted by the time cap. The realized command and manifests, rather than the example below, are authoritative for the pilot.
+The script checks a runner duration and absolute UTC cutoff and reserves time for evaluation. All derived artifacts go under the output directory. It records every planned policy and evaluation, including runs skipped or interrupted by the time cap. The realized command and manifests, rather than the example below, are authoritative for the pilot.
 
 The public benchmark declares goal observations at indices 36 to 38 with zero width. The reset observation falls outside those declared bounds. The adapter broadens only those three goal bounds to infinity and leaves every observation value unchanged. It rejects observations outside the other declared bounds and checks shape and finiteness.
 
@@ -54,9 +55,26 @@ env -u PYTHONPATH experiments/metaworld/.venv/bin/python -m scripts.metaworld_ru
   --output artifacts/metaworld-runtime-smoke-new --device cuda
 env -u PYTHONPATH experiments/metaworld/.venv/bin/python -m scripts.metaworld_competence \
   --output artifacts/metaworld-competence-new --seconds 2500 --reserve-seconds 300 \
+  --deadline-utc "${APPROVED_DEADLINE_UTC:?set an approved absolute UTC cutoff}" \
   --steps-per-policy 25000 --evaluation-episodes 20 --seed 20261015 --device cuda
 ```
 
 The second command trains one policy each on reach, push and pick-place using a shared initial actor and separate task-specific critic/environment/training seeds. It saves the shared initial actor, final checkpoints, layouts/hashes and every fresh own-task episode. Each task passes the operational screen only with complete 25,000-step training and at least 16 of 20 successful complete evaluation episodes; the whole screen also requires matching initial actor hashes. A completed screen can fail competence without being a runtime error. A 128-step/one-episode invocation is labeled as smoke data and is kept separate.
 
 This small screen performs no oracle projections or practical adaptation. Its single-library result does not estimate seed variability. The 2026-10-15 launch is authorized for one inclusive local hour; these example commands do not authorize additional compute or another run. Preserve failures and partial outcomes under the global deadline rather than extending it.
+
+## Executable session deadlines
+
+Both population-pilot and competence runners require `--deadline-utc`, an ISO 8601 timestamp with an explicit timezone (for example `2026-11-09T20:00:00Z`). This is the approved inclusive session cutoff; `--seconds` is a separate maximum runner duration. The earlier frozen JSON remains historical evidence and does not retroactively supply this new executable argument. Example commands require an explicitly set `APPROVED_DEADLINE_UTC`; they allocate no compute.
+
+A shared guard checks the absolute UTC clock and monotonic duration before environment/model initialization, on every training callback, at environment reset/step boundaries, at SAC optimizer entry, and before/within evaluation. The evaluation reserve applies to the shorter remaining UTC/monotonic window. A detected global cutoff stays latched even if the wall clock moves backward later. Environment guards preserve the runtime environment type; the temporary optimizer guard is restored before saving a checkpoint.
+
+The legacy population-pilot module still imports its runtime dependencies before the runner clock starts; its manifest records this timing scope. Its absolute cutoff is checked before thread/CUDA/environment/model initialization. The competence runner starts and persists its clock before loading its runtime. Neither path claims preemption during Python imports.
+
+These checks are cooperative: an executing simulator, optimizer, initialization or I/O call cannot be preempted. On return from a late wake or blocking call, no further guarded transition/update starts. Checkpoint/manifest retention and resource cleanup may finish after the cutoff. The runners retain partial checkpoints, actual episode rows (marking unfinished episodes incomplete), missing-task/evaluation coverage, cutoff reason/phase, UTC start/finish/span and monotonic elapsed time. A run finishing beyond either observed limit cannot receive a complete, budget-compliant status, even when all requested scientific slots happen to be present.
+
+The regression suite uses injected clocks, inert runtime modules and fake environments/SAC with tiny CPU actors. It covers late starts, forward/backward clock jumps, monotonic exhaustion, reserves, no transitions/updates after a late wake, partial artifact retention and prevention of late completion. It performs no simulator rollouts, scientific training or real sleeps:
+
+```bash
+python -m pytest tests/test_metaworld_deadlines.py tests/test_metaworld_competence.py
+```
