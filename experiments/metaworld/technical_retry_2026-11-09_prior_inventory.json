@@ -1,0 +1,59 @@
+{
+  "status": "ERROR",
+  "finished_at_utc": "2026-11-09T16:11:10.884986+00:00",
+  "elapsed_seconds": 11.137376390999634,
+  "ledger": {
+    "development_evaluation_steps": 0,
+    "failed_step_calls": 0,
+    "final_test_steps": 0,
+    "optimizer_update_attempts": 0,
+    "optimizer_updates": 0,
+    "preflight_steps": 1,
+    "source_policy_starts": 3,
+    "source_training_steps": 0,
+    "target_steps": 0,
+    "total_agent_steps": 1
+  },
+  "errors": [
+    "TypeError: object of type 'pickle.PickleBuffer' has no len()"
+  ],
+  "traceback": "Traceback (most recent call last):\n  File \"/tmp/ups-staged-competence-20261109/scripts/metaworld_development.py\", line 402, in run\n    self.runtime.preflight(list(self.states.values()))\n  File \"/tmp/ups-staged-competence-20261109/scripts/metaworld_development.py\", line 729, in preflight\n    files = self.save(state, f\"preflight/{state.task}\")\n  File \"/tmp/ups-staged-competence-20261109/scripts/metaworld_development.py\", line 622, in save\n    save(handle)\n  File \"/home/icannon/code/UWSH-nethack-worktrees/metaworld-measurement-validation-2026-10-05/experiments/metaworld/.venv/lib/python3.10/site-packages/stable_baselines3/common/off_policy_algorithm.py\", line 218, in save_replay_buffer\n    save_to_pkl(path, self.replay_buffer, self.verbose)\n  File \"/home/icannon/code/UWSH-nethack-worktrees/metaworld-measurement-validation-2026-10-05/experiments/metaworld/.venv/lib/python3.10/site-packages/stable_baselines3/common/save_util.py\", line 354, in save_to_pkl\n    pickle.dump(obj, file, protocol=pickle.HIGHEST_PROTOCOL)\n  File \"/tmp/ups-staged-competence-20261109/scripts/metaworld_development.py\", line 61, in write\n    projected = max(self.high_water, self.tell() + len(data))\nTypeError: object of type 'pickle.PickleBuffer' has no len()\n",
+  "files": [
+    {
+      "path": "development_manifest.json",
+      "bytes": 227407,
+      "sha256": "1fb6639e1eb29bae0c3dd308ceee3170b906faa248f8f624d775f19eac7953c1"
+    },
+    {
+      "path": "frozen_launch.json",
+      "bytes": 225872,
+      "sha256": "4d789dac14d143123e27f80b7ab9c59bc06fee1462620f750d945ef937a2a94a"
+    },
+    {
+      "path": "initial/pick-place-v3.actor.npz",
+      "bytes": 323877,
+      "sha256": "ce77cc4d36aada24f473ea4443360fbb167ea1a07f8eec3cb952568e1f7b8424"
+    },
+    {
+      "path": "initial/push-v3.actor.npz",
+      "bytes": 323877,
+      "sha256": "ce77cc4d36aada24f473ea4443360fbb167ea1a07f8eec3cb952568e1f7b8424"
+    },
+    {
+      "path": "initial/reach-v3.actor.npz",
+      "bytes": 323877,
+      "sha256": "ce77cc4d36aada24f473ea4443360fbb167ea1a07f8eec3cb952568e1f7b8424"
+    },
+    {
+      "path": "preflight/reach-v3.replay.pkl",
+      "bytes": 2321,
+      "sha256": "52b9dd53009480b56e96c491fbf7631584434eb6949efde772bfa5a991f12e26"
+    },
+    {
+      "path": "preflight/reach-v3.zip",
+      "bytes": 1579904,
+      "sha256": "73de912da3038b1c637f443a30a4ccacf8c0f5be1e4abea5db774be71642f058"
+    }
+  ],
+  "total_bytes": 3007135
+}

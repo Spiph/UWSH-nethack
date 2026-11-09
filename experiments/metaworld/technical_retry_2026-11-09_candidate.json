@@ -1,0 +1,42 @@
+{
+  "additional_policy_starts": 3,
+  "approval_required": true,
+  "base_plan_sha256": "db64456636b332c192bae867bd08f20c8beffc4b9597d727c4024cd0c0d90fae",
+  "cumulative_artifact_cap_bytes": 2147483648,
+  "cumulative_interaction_caps": {
+    "development_evaluation_steps": 60000,
+    "final_test_steps": 0,
+    "preflight_steps": 1000,
+    "source_training_steps": 750000,
+    "target_steps": 0,
+    "total_agent_steps": 811000
+  },
+  "cumulative_policy_starts": 6,
+  "deadline_utc": "2026-11-09T21:35:00+00:00",
+  "decision_issue": 43,
+  "prior_artifact_bytes": 3007135,
+  "prior_artifact_root": "/home/icannon/code/UWSH-nethack/artifacts/metaworld-development-2026-11-09",
+  "prior_inventory_file": "technical_retry_2026-11-09_prior_inventory.json",
+  "prior_inventory_sha256": "317ac4045dcc00130c0b9b4f2e23f5ec4ca829c00ab7f69b13c1b7ddbd1944d6",
+  "prior_ledger": {
+    "development_evaluation_steps": 0,
+    "failed_step_calls": 0,
+    "final_test_steps": 0,
+    "optimizer_update_attempts": 0,
+    "optimizer_updates": 0,
+    "preflight_steps": 1,
+    "source_policy_starts": 3,
+    "source_training_steps": 0,
+    "target_steps": 0,
+    "total_agent_steps": 1
+  },
+  "prior_preflight_seconds_charged": 12,
+  "purpose": "one_zero_learning_technical_replacement",
+  "replacement_artifact_cap_bytes": 2144476513,
+  "replacement_artifact_root": "/home/icannon/code/UWSH-nethack/artifacts/metaworld-development-2026-11-09-r2",
+  "replacement_preflight_seconds": 888,
+  "schema_version": 1,
+  "session_started_utc": "2026-11-09T15:35:00+00:00",
+  "technical_retries": 1,
+  "training_deadline_utc": "2026-11-09T21:05:00+00:00"
+}

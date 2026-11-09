@@ -151,8 +151,11 @@ class DevelopmentRunner:
         *,
         budget: RunDeadline | None = None,
         runtime_factory: Callable[[DevelopmentRunner], Any] | None = None,
+        approval_validator: Callable[[Any, dict[str, Any]], None] | None = None,
+        prelearning_validator: Callable[[DevelopmentRunner], dict[str, Any]] | None = None,
     ) -> None:
-        validate_approval(plan, approval)
+        (approval_validator or validate_approval)(plan, approval)
+        self.prelearning_validator = prelearning_validator
         plan.validate()
         remaining = (plan.deadline_utc - utc_now()).total_seconds()
         self.budget = budget or RunDeadline(max(remaining, 0.001), plan.deadline_utc)
@@ -399,6 +402,8 @@ class DevelopmentRunner:
             hashes = {state.metadata["initial_actor_sha256"] for state in self.states.values()}
             if len(hashes) != 1:
                 raise ValueError("shared initial actors differ")
+            if self.prelearning_validator is not None:
+                self.manifest["prelearning_verification"] = self.prelearning_validator(self)
             self.manifest["goal_manifests"] = {
                 task: state.goals.to_dict() for task, state in self.states.items()
             }
