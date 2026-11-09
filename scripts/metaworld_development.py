@@ -49,6 +49,15 @@ def code_hashes() -> dict[str, str]:
     return {path.name: digest(path) for path in Path(__file__).parent.glob("metaworld_*.py")}
 
 
+def ledger_snapshot(ledger: dict[str, int]) -> dict[str, int]:
+    snapshot = dict(ledger)
+    snapshot["total_agent_steps"] = sum(
+        snapshot[key]
+        for key in ("source_training_steps", "development_evaluation_steps", "preflight_steps")
+    )
+    return snapshot
+
+
 class CappedWriter(io.BufferedWriter):
     def __init__(self, path: Path, store: ArtifactStore, metadata: bool = False) -> None:
         self.store = store
@@ -281,10 +290,7 @@ class DevelopmentRunner:
                 model.train = prior
 
     def persist(self) -> None:
-        self.ledger["total_agent_steps"] = sum(
-            self.ledger[key]
-            for key in ("source_training_steps", "development_evaluation_steps", "preflight_steps")
-        )
+        self.ledger["total_agent_steps"] = ledger_snapshot(self.ledger)["total_agent_steps"]
         timing: dict[str, Any] = {}
         self.budget.record(timing)
         self.manifest.update(
@@ -683,7 +689,7 @@ class Runtime:
                     if returns
                     else None,
                     "training_episode_samples": len(returns),
-                    "ledger": dict(runner.ledger),
+                    "ledger": ledger_snapshot(runner.ledger),
                     "visit_steps_per_second": (steps - initial_steps)
                     / max(runner.budget.monotonic() - started, 0.000001),
                 }

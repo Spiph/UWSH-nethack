@@ -8,7 +8,7 @@ import sys
 from contextlib import contextmanager, nullcontext
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from types import SimpleNamespace
+from types import ModuleType, SimpleNamespace
 from typing import Any, Literal
 
 import numpy as np
@@ -20,6 +20,7 @@ from scripts.metaworld_development import (
     ArtifactStore,
     DevelopmentRunner,
     LearnerRNG,
+    Runtime,
     Stopped,
     TaskState,
     capture_rng,
@@ -492,3 +493,53 @@ def test_typed_multidimensional_memoryview_is_charged_by_bytes(tmp_path: Path) -
     ):
         handle.write(view)
     assert store.size() == 0
+
+
+def test_progress_refreshes_cumulative_total_before_persist_and_keeps_history_immutable(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    engine, clock = runner(tmp_path)
+    # One preserved preflight step plus three replacement steps are already charged.
+    engine.ledger.update(preflight_steps=4, total_agent_steps=4, source_policy_starts=6)
+    model = SimpleNamespace(
+        num_timesteps=0, logger=SimpleNamespace(name_to_value={}), ep_info_buffer=[]
+    )
+    state: Any = SimpleNamespace(task="reach-v3", model=model)
+
+    class FakeBaseCallback:
+        def __init__(self, verbose: int = 0) -> None:
+            pass
+
+        def _on_step(self) -> bool:
+            return True
+
+        def on_step(self) -> bool:
+            return self._on_step()
+
+    module = ModuleType("stable_baselines3.common.callbacks")
+    module.__dict__["BaseCallback"] = FakeBaseCallback
+    monkeypatch.setitem(sys.modules, module.__name__, module)
+    runtime = Runtime.__new__(Runtime)
+    runtime.runner = engine
+    callback = runtime.training_callback(state)
+    callback.model = model
+
+    engine.ledger["source_training_steps"] = model.num_timesteps = 2000
+    clock.tick = 1
+    assert callback.on_step() is True
+    first = engine.progress_rows[0]["ledger"]
+    assert first["source_training_steps"] == 2000
+    assert first["preflight_steps"] == 4
+    assert first["total_agent_steps"] == 2004
+    assert first["source_policy_starts"] == 6
+    # No checkpoint/manifest persistence has refreshed the mutable live ledger.
+    assert engine.ledger["total_agent_steps"] == 4
+
+    engine.ledger["source_training_steps"] = model.num_timesteps = 3000
+    engine.ledger["development_evaluation_steps"] = 500
+    assert callback.on_step() is True
+    assert engine.progress_rows[1]["ledger"]["total_agent_steps"] == 3504
+    assert first["total_agent_steps"] == 2004
+    assert first["development_evaluation_steps"] == 0
+    saved = json.loads((engine.store.root / "progress.json").read_text())
+    assert [row["ledger"]["total_agent_steps"] for row in saved] == [2004, 3504]
