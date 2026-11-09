@@ -22,6 +22,7 @@ from scripts.metaworld_deadlines import (
     guard_model,
     parse_deadline,
 )
+from scripts.metaworld_protocol import Goal, GoalBank, SeedStreams
 
 
 class FakeClock:
@@ -142,13 +143,40 @@ def test_late_start_writes_rejection_without_loading_or_initializing_runtime(
     assert result["missing_evaluation_episodes"] == {task: [0] for task in competence.TASKS}
 
 
+def synthetic_bank(task: str, streams: Any, *, split: str) -> GoalBank:
+    goal = Goal(task, "eA==", (1.0 if split == "source" else 2.0,))
+    return GoalBank(split, 1, (goal,))
+
+
 def fake_runtime(monkeypatch: pytest.MonkeyPatch, clock: FakeClock, jump_phase: str) -> list[str]:
     """Exercise the real runner using tiny CPU actors and fake environments/SAC."""
     events: list[str] = []
 
     class FakeEnv:
+        def __init__(
+            self, bank: GoalBank, order: tuple[int, ...] | None, streams: SeedStreams
+        ) -> None:
+            self.bank, self.order = bank, order
+            self.episode_rng = np.random.default_rng(streams.episode)
+            self.history: list[dict[str, Any]] = []
+
         def reset(self, **kwargs: Any) -> tuple[npt.NDArray[np.float64], dict[str, Any]]:
             events.append("reset")
+            index = len(self.history)
+            goal_index = self.order[index] if self.order is not None else 0
+            self.history.append(
+                {
+                    "episode": index,
+                    "goal_index": goal_index,
+                    "goal_id": self.bank.goals[goal_index].goal_id,
+                    "goal_bank_sha256": self.bank.sha256,
+                    "episode_seed": int(self.episode_rng.integers(0, 2**32, dtype=np.uint64)),
+                    "length": 0,
+                    "complete_episode": False,
+                    "terminated": False,
+                    "truncated": False,
+                }
+            )
             return np.zeros(39), {}
 
         def step(
@@ -157,14 +185,29 @@ def fake_runtime(monkeypatch: pytest.MonkeyPatch, clock: FakeClock, jump_phase: 
             events.append("step")
             if jump_phase == "evaluation":
                 clock.advance(utc=300, monotonic=0.01)
-            return np.zeros(39), 1.0, jump_phase == "completion", False, {"success": 1}
+            record = self.history[-1]
+            record["length"] += 1
+            truncated = jump_phase == "completion" and record["length"] == 500
+            record.update(truncated=truncated, complete_episode=truncated, success=True)
+            return np.zeros(39), 1.0, False, truncated, {"success": 1}
+
+        def get_wrapper_attr(self, name: str) -> Any:
+            assert name == "protocol_manifest"
+            return lambda: {"goal_bank": self.bank.to_dict(), "episode_history": self.history}
 
         def close(self) -> None:
             events.append("close")
 
-    def make_env(*args: Any, budget: RunDeadline, **kwargs: Any) -> Any:
+    def make_env(
+        *args: Any,
+        budget: RunDeadline,
+        bank: GoalBank,
+        streams: SeedStreams,
+        goal_order: tuple[int, ...] | None = None,
+        **kwargs: Any,
+    ) -> Any:
         events.append("make_env")
-        return guard_env(FakeEnv(), budget)
+        return guard_env(FakeEnv(bank, goal_order, streams), budget)
 
     class FakeCallback(TrainingDeadline):
         pass
@@ -210,6 +253,13 @@ def fake_runtime(monkeypatch: pytest.MonkeyPatch, clock: FakeClock, jump_phase: 
             DeadlineCallback=FakeCallback,
         ),
     )
+
+    def build_model(env: Any, streams: SeedStreams, **kwargs: Any) -> Any:
+        torch.manual_seed(streams.actor)
+        return FakeSAC(), {"actor_seed": streams.actor}
+
+    monkeypatch.setattr(competence, "generate_goal_bank", synthetic_bank)
+    monkeypatch.setattr(competence, "build_seeded_sac", build_model)
     monkeypatch.setattr(competence, "_runtime_package_hashes", dict)
     return events
 
@@ -429,7 +479,19 @@ def test_pilot_evaluation_retains_partial_episode_after_forward_clock_jump(
                 clock.advance(utc=300, monotonic=0.01)
             return np.zeros(4), None
 
+    bank = synthetic_bank("reach-v3", None, split="development")
     monkeypatch.setattr(pilot, "make_env", lambda *args, **kwargs: guard_env(Env(), budget))
+    monkeypatch.setattr(pilot, "generate_goal_bank", synthetic_bank)
+    monkeypatch.setattr(
+        pilot,
+        "evaluation_record",
+        lambda env: {
+            "goal_id": bank.goals[0].goal_id,
+            "goal_bank_sha256": bank.sha256,
+            "terminated": False,
+            "truncated": False,
+        },
+    )
     rows = pilot.eval_model(Model(), "reach-v3", 0, "shared_init", "id", "trained", 2, budget)
     assert len(rows) == 1
     assert rows[0]["length"] == 1
@@ -601,3 +663,38 @@ def test_actual_pilot_enters_optimizer_guard_and_saves_partial_on_late_wake(
     assert len(result["source_runs"]) == 1
     assert result["source_runs"][0]["environment_steps_completed"] == 1
     assert Path(result["source_runs"][0]["model_file"]).read_text() == "partial checkpoint"
+
+
+def test_protocol_factory_keeps_first_goal_unconsumed_and_wraps_deadline_boundaries(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    pilot = load_pilot_without_runtime(monkeypatch)
+    clock = FakeClock()
+    budget = clock.budget()
+    events: list[str] = []
+    supplied: dict[str, Any] = {}
+    env = SimpleNamespace(
+        reset=lambda **kwargs: events.append("reset"),
+        step=lambda action: events.append("step"),
+        close=lambda: None,
+    )
+
+    def factory(task: str, streams: SeedStreams, **kwargs: Any) -> Any:
+        supplied.update(task=task, streams=streams, **kwargs)
+        return env
+
+    monkeypatch.setattr(pilot, "make_protocol_env", factory)
+    monkeypatch.setattr(pilot, "CorrectedGoalBounds", lambda value: value)
+    streams = SeedStreams.from_seed(1)
+    bank = synthetic_bank("reach-v3", streams, split="development")
+    result = pilot.make_env(
+        "reach-v3", 1, budget=budget, bank=bank, streams=streams, goal_order=(0,)
+    )
+    assert events == []
+    assert supplied == {"task": "reach-v3", "streams": streams, "bank": bank, "goal_order": (0,)}
+    result.reset()
+    assert events == ["reset"]
+    clock.advance(utc=300)
+    with pytest.raises(BudgetExpired):
+        result.step(np.zeros(4))
+    assert events == ["reset"]

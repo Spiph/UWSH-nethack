@@ -14,7 +14,6 @@ from pathlib import Path
 from typing import Any
 
 import gymnasium as gym
-import metaworld
 import numpy as np
 import torch
 from gymnasium import ObservationWrapper
@@ -41,6 +40,18 @@ if __package__:
         verify_policy_symmetry,
     )
     from .metaworld_pilot_report import summarize_manifest
+    from .metaworld_protocol import (
+        ENVIRONMENT_CONTRACT,
+        GoalBank,
+        GoalManifest,
+        SeedStreams,
+        build_seeded_sac,
+        evaluation_order,
+        evaluation_record,
+        generate_goal_bank,
+        make_protocol_env,
+        validate_evaluation_coverage,
+    )
 else:
     from metaworld_deadlines import (
         BudgetExpired,
@@ -60,6 +71,18 @@ else:
         verify_policy_symmetry,
     )
     from metaworld_pilot_report import summarize_manifest
+    from metaworld_protocol import (
+        ENVIRONMENT_CONTRACT,
+        GoalBank,
+        GoalManifest,
+        SeedStreams,
+        build_seeded_sac,
+        evaluation_order,
+        evaluation_record,
+        generate_goal_bank,
+        make_protocol_env,
+        validate_evaluation_coverage,
+    )
 
 TASKS = ("reach-v3", "push-v3", "pick-place-v3")
 REPLICATES = 3
@@ -98,24 +121,33 @@ class CorrectedGoalBounds(ObservationWrapper):
         return obs
 
 
-def make_env(task: str, seed: int, *, budget: RunDeadline | None = None) -> gym.Env:
+def make_env(
+    task: str,
+    seed: int,
+    *,
+    budget: RunDeadline | None = None,
+    bank: GoalBank | None = None,
+    streams: SeedStreams | None = None,
+    goal_order: tuple[int, ...] | None = None,
+) -> gym.Env:
     if task not in TASKS:
         raise ValueError(f"unsupported task: {task}")
-    env_id = "Meta-World/MT1"
-    if env_id not in gym.registry:
-        metaworld.register_mw_envs()
     if budget is not None:
         budget.require("environment_initialization")
-    env = gym.make(env_id, env_name=task, disable_env_checker=True)
-    wrapped = CorrectedGoalBounds(env)
-    if budget is not None:
-        guard_env(wrapped, budget)
+    env = make_protocol_env(
+        task, streams or SeedStreams.from_seed(seed), bank=bank, goal_order=goal_order
+    )
     try:
-        wrapped.reset(seed=seed)
+        if budget is not None:
+            budget.require("environment_ready")
+        wrapped = CorrectedGoalBounds(env)
+        if budget is not None:
+            guard_env(wrapped, budget)
+        # No proactive reset: callers must consume the first declared goal themselves.
+        return wrapped
     except BaseException:
-        wrapped.close()
+        env.close()
         raise
-    return wrapped
 
 
 class DeadlineCallback(BaseCallback, TrainingDeadline):
@@ -158,12 +190,19 @@ def eval_model(
     kind: str,
     episode_count: int,
     budget: RunDeadline,
+    bank: GoalBank | None = None,
 ) -> list[dict[str, Any]]:
     budget.require("evaluation_initialization")
+    env_seed = BASE_SEED + 700_000 + replicate * 10_000 + TASKS.index(task) * 100
+    streams = SeedStreams.from_seed(env_seed)
+    bank = generate_goal_bank(task, streams, split="development") if bank is None else bank
     env = make_env(
         task,
-        BASE_SEED + 700_000 + replicate * 10_000 + TASKS.index(task) * 100,
+        env_seed,
         budget=budget,
+        bank=bank,
+        streams=streams,
+        goal_order=evaluation_order(bank, episode_count),
     )
     rows: list[dict[str, Any]] = []
     try:
@@ -207,12 +246,15 @@ def eval_model(
                         "length": length,
                         "complete_episode": bool(terminated or truncated),
                         "cutoff_reason": budget.cutoff_reason,
+                        **evaluation_record(env),
                     }
                 )
             if not budget.allowed("evaluation_episode"):
                 break
     finally:
         env.close()
+    if len(rows) == episode_count and all(row["complete_episode"] for row in rows):
+        validate_evaluation_coverage(rows, bank, evaluation_order(bank, episode_count))
     return rows
 
 
@@ -249,6 +291,7 @@ def main() -> int:
                 "metaworld_geometry.py",
                 "metaworld_pilot_report.py",
                 "metaworld_deadlines.py",
+                "metaworld_protocol.py",
             )
         },
         "started_at_utc": budget.started_utc.isoformat(),
@@ -277,14 +320,17 @@ def main() -> int:
         },
         "seed_convention": {
             "base": BASE_SEED,
-            "training_environment": (
-                "base + 100000 + replicate*1000 + task_index*10 + condition_index"
-            ),
+            "paired_environment_base": "base + 100000 + replicate*1000 + task_index*10",
+            "streams": "SeedStreams.from_seed: stable SHA256-derived named uint32 streams",
+            "sac_constructor": "critic stream, then actor-seeded actor construction and copy",
+            "training": "training stream applied after model initialization",
             "initial_actor_shared": "base + 10000 + replicate*100 + condition_index",
             "initial_actor_independent": (
                 "base + 10000 + replicate*100 + task_index*10 + condition_index"
             ),
         },
+        "environment_protocol": dict(ENVIRONMENT_CONTRACT),
+        "goal_manifests": {},
         "permutation_control_max_abs_error": None,
         "source_runs": [],
         "cross_task_evaluations": [],
@@ -296,6 +342,27 @@ def main() -> int:
     source_models: dict[tuple[str, int, str], dict[str, Any]] = {}
     all_eval: list[dict[str, Any]] = []
     active_env = None
+    goal_manifests: dict[tuple[int, str], GoalManifest] = {}
+
+    def goals_for_library(replicate: int, task: str) -> GoalManifest:
+        key = (replicate, task)
+        if key not in goal_manifests:
+            task_seed = BASE_SEED + 100_000 + replicate * 1_000 + TASKS.index(task) * 10
+            streams = SeedStreams.from_seed(task_seed)
+            banks = []
+            for split in ("source", "development"):
+                budget.require("goal_bank_generation")
+                banks.append(generate_goal_bank(task, streams, split=split))
+                budget.require("goal_bank_ready")
+            goals = GoalManifest(tuple(banks))
+            goal_manifests[key] = goals
+            manifest["goal_manifests"][f"lib{replicate}:{task}"] = {
+                "sha256": goals.sha256,
+                "manifest": goals.to_dict(),
+            }
+            atomic_json(args.output / "pilot_manifest.json", manifest)
+        return goal_manifests[key]
+
     try:
         budget.require("runtime_initialization")
         torch.set_num_threads(4)
@@ -364,20 +431,19 @@ def main() -> int:
                         "training_initialization", reserve_seconds=args.reserve_seconds
                     ):
                         break
-                    env_seed = (
-                        BASE_SEED + 100_000 + replicate * 1_000 + task_index * 10 + condition_index
-                    )
+                    env_seed = BASE_SEED + 100_000 + replicate * 1_000 + task_index * 10
                     init_seed = BASE_SEED + 10_000 + replicate * 100 + condition_index
                     if condition == "independent_init":
                         init_seed += task_index * 10
-                    torch.manual_seed(init_seed)
-                    np.random.seed(env_seed)
-                    active_env = env = make_env(task, env_seed, budget=budget)
+                    streams = SeedStreams.from_seed(env_seed, actor_seed=init_seed)
+                    goals = goals_for_library(replicate, task)
+                    active_env = env = make_env(
+                        task, env_seed, budget=budget, bank=goals.for_fitting()[0], streams=streams
+                    )
                     budget.require("source_model_initialization")
-                    model = SAC(
-                        "MlpPolicy",
+                    model, initialization = build_seeded_sac(
                         env,
-                        seed=env_seed,
+                        streams,
                         device=device,
                         policy_kwargs={"net_arch": [256, 256]},
                         learning_rate=3e-4,
@@ -388,11 +454,6 @@ def main() -> int:
                         gradient_steps=1,
                         verbose=0,
                     )
-                    # SAC's constructor seeds its actor before learning. Reseed
-                    # environment/training randomness only after initialization,
-                    # and retain the distinct environment seed for vector resets.
-                    model.set_random_seed(env_seed)
-                    model.seed = env_seed
                     if condition == "shared_init":
                         if shared_actor_state is None:
                             shared_actor_state = {
@@ -421,6 +482,16 @@ def main() -> int:
                         if initial_hash != expected:
                             raise ValueError("shared actor initialization hash mismatch")
 
+                    ident = run_id(condition, task, replicate)
+                    job_dir = args.output / "policies"
+                    job_dir.mkdir(exist_ok=True)
+                    initial_vector, initial_layout = actor_vector(model.policy.actor)
+                    initial_actor_path = job_dir / f"{ident}.initial_actor.npz"
+                    np.savez_compressed(
+                        initial_actor_path,
+                        vector=initial_vector,
+                        layout_json=np.asarray(json.dumps(initial_layout)),
+                    )
                     callback = DeadlineCallback(budget, reserve_seconds=args.reserve_seconds)
                     job_started = budget.monotonic()
                     try:
@@ -435,9 +506,6 @@ def main() -> int:
                         pass  # Save the actual partial checkpoint before stopping.
                     budget.allowed("training_return")
                     elapsed = budget.monotonic() - job_started
-                    ident = run_id(condition, task, replicate)
-                    job_dir = args.output / "policies"
-                    job_dir.mkdir(exist_ok=True)
                     model_path = job_dir / ident
                     model.save(str(model_path))
                     final_vector, layout = actor_vector(model.policy.actor)
@@ -451,8 +519,13 @@ def main() -> int:
                         "condition": condition,
                         "task": task,
                         "replicate": replicate,
-                        "environment_seed": env_seed,
-                        "initialization_seed": init_seed,
+                        "stream_namespace_seed": env_seed,
+                        "environment_seed": streams.constructor,
+                        "critic_seed": streams.critic,
+                        "training_seed": streams.training,
+                        "initialization_seed": streams.actor,
+                        "initialization_recipe": initialization,
+                        "initial_actor_file": str(initial_actor_path),
                         "initial_actor_sha256": initial_hash,
                         "final_actor_sha256": hash_actor(model.policy.actor),
                         "environment_steps_completed": int(model.num_timesteps),
@@ -466,6 +539,10 @@ def main() -> int:
                         "model_file": str(model_path.with_suffix(".zip")),
                         "actor_file": str(job_dir / f"{ident}.actor.npz"),
                         "actor_layout": layout,
+                        "environment_protocol": env.get_wrapper_attr("protocol_manifest")(),
+                        "goal_manifest_sha256": goals.sha256,
+                        "training_split": "source",
+                        "training_goal_bank_sha256": goals.for_fitting()[0].sha256,
                     }
                     source_models[(condition, replicate, task)] = {
                         "path": str(model_path.with_suffix(".zip")),
@@ -503,12 +580,15 @@ def main() -> int:
         manifest["training_stopped_at_utc"] = datetime.now(timezone.utc).isoformat()
         atomic_json(args.output / "pilot_manifest.json", manifest)
 
-        # Every completed source policy is evaluated on each task with new reset seeds.
+        # All arms consume the same declared development goals and episode streams.
         for (condition, replicate, training_task), item in source_models.items():
             for evaluation_task in TASKS:
                 if not budget.allowed("evaluation_episode"):
                     break
-                active_env = env = make_env(evaluation_task, BASE_SEED + 900_000, budget=budget)
+                evaluation_bank = goals_for_library(replicate, evaluation_task).for_tuning()[0]
+                active_env = env = make_env(
+                    evaluation_task, BASE_SEED + 900_000, budget=budget, bank=evaluation_bank
+                )
                 budget.require("evaluation_model_load")
                 model = SAC.load(item["path"], env=env, device=device)
                 rows = eval_model(
@@ -520,6 +600,7 @@ def main() -> int:
                     "trained_policy",
                     args.evaluation_episodes,
                     budget,
+                    bank=evaluation_bank,
                 )
                 all_eval.extend(rows)
                 env.close()
@@ -585,7 +666,10 @@ def main() -> int:
                     ):
                         if not budget.allowed("evaluation_episode"):
                             break
-                        active_env = env = make_env(target_task, BASE_SEED + 950_000, budget=budget)
+                        evaluation_bank = goals_for_library(replicate, target_task).for_tuning()[0]
+                        active_env = env = make_env(
+                            target_task, BASE_SEED + 950_000, budget=budget, bank=evaluation_bank
+                        )
                         budget.require("oracle_model_load")
                         model = SAC.load(target["path"], env=env, device=device)
                         load_actor_vector(model.policy.actor, vector, target["layout"])
@@ -598,6 +682,7 @@ def main() -> int:
                             kind,
                             args.evaluation_episodes,
                             budget,
+                            bank=evaluation_bank,
                         )
                         all_eval.extend(rows)
                         env.close()
