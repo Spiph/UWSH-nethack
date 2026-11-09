@@ -1,0 +1,21 @@
+{
+  "purpose": "exploratory single-library competence calibration",
+  "tasks": ["reach-v3", "push-v3", "pick-place-v3"],
+  "source_runs": 3,
+  "algorithm": "SAC",
+  "initialization": "shared actor, task-specific critic and environment streams",
+  "seed": 20261015,
+  "steps_per_policy": 25000,
+  "evaluation_episodes_per_task": 20,
+  "required_successes_per_task": 16,
+  "runner_seconds": 1800,
+  "evaluation_reserve_seconds": 300,
+  "device": "cuda",
+  "inclusive_session_deadline_utc": "2026-10-15T19:30:46Z",
+  "output": "artifacts/metaworld-competence-2026-10-15",
+  "source_training_environment_steps_maximum": 75000,
+  "evaluation_environment_steps_maximum": 30000,
+  "stopping_rule": "Stop at the runtime/session deadline; retain all incomplete/failed outcomes. No post-outcome extension or task replacement.",
+  "interpretation": "Requires exact training/evaluation coverage and shared initial hashes. Competence screen only; no held-out adaptation or novelty claim.",
+  "approval": "User approved the recommended local one-hour screen with 'ok do this' on 2026-10-15."
+}

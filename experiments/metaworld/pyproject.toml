@@ -1,0 +1,13 @@
+[project]
+name = "uwsh-metaworld-pilot"
+version = "0.1.0"
+description = "Pinned Meta-World pilot for policy-subspace reuse research"
+requires-python = ">=3.10,<3.11"
+dependencies = [
+  "gymnasium==1.1.1",
+  "metaworld==3.1.1",
+  "mujoco==3.3.0",
+  "numpy==1.26.4",
+  "stable-baselines3==2.6.0",
+  "torch==2.3.0",
+]

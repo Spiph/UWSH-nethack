@@ -1,0 +1,110 @@
+# Meta-World experimental runtime and historical pilots
+
+This isolated project was introduced for the historical 18-source-policy pilot: reach, push and pick-place; three independent library replicates; shared and independent actor initialization. Those counts and the spent one-hour allowances are historical, not a standing allocation for new runs. Meta-World 3.1.1 requires Gymnasium 1.1 or newer and MuJoCo 3.3.0. Stable-Baselines3 2.6.0 is pinned because its changelog adds Gymnasium 1.1 support; 2.5.0 is incompatible with this benchmark release.
+
+The [accepted scope](https://github.com/Spiph/UWSH-nethack/issues/31) uses custom visible-goal Meta-World experiments for held-out task-family adaptation, with within-family goal transfer as a diagnostic and a focused MiniHack replication. Local development and costing precede campaign sizing. No numerical training or calibration allocation is currently authorized. The [research roadmap](https://github.com/Spiph/UWSH-nethack/issues/9) is the execution contract; the examples below describe command shapes rather than new run budgets.
+
+The historical pilot tested setup, competence and preliminary functional reuse within a one-hour local-use cap. It is exploratory. A partial or undertrained population cannot establish transfer or novelty. The first 25,000-step reach run is a throughput calibration, stored separately and excluded from the balanced cohort. The balanced cohort targeted 4,000 environment steps per policy, with one evaluation episode per task; this shortened budget was chosen after measuring runtime and is not a confirmation test.
+
+The original pilot reused the repository's Python 3.10 and CUDA-enabled PyTorch 2.2.2 through a temporary isolated environment. The supported runtime uses this project's checked-in dependency lock instead. Install it with `uv sync --frozen` and invoke its interpreter with `PYTHONPATH` removed, as shown below.
+
+The standalone lock uses Torch 2.3.0 to meet Stable-Baselines3's declared requirement and NumPy 1.26.4 to match the locally validated NumPy version. The original pilot reused Torch 2.2.2 outside that declared dependency range; the pinned runtime subsequently passed the separate 2026-10-15 mechanics check described below. The corrected task/seed protocol passed bounded CPU validation on 2026-11-09: paired reset/step sequences for reach, push and pick-place, plus the full 500-step reach truncation. This used 522 fixed-action transitions and no policy training; competence and practical adaptation remain separate gates. The measurement-only commands below use the existing repository environment.
+
+```bash
+uv sync --project experiments/metaworld --frozen
+uv run --project experiments/metaworld --frozen python scripts/metaworld_hour_pilot.py \
+  --output artifacts/metaworld-one-hour-pilot-r1 \
+  --deadline-utc "${APPROVED_DEADLINE_UTC:?set an approved absolute UTC cutoff}"
+```
+
+The script checks a runner duration and absolute UTC cutoff and reserves time for evaluation. All derived artifacts go under the output directory. It records every planned policy and evaluation, including runs skipped or interrupted by the time cap. The realized command and manifests, rather than the example below, are authoritative for the pilot.
+
+The public benchmark declares goal observations at indices 36 to 38 with zero width. The reset observation falls outside those declared bounds. The adapter broadens only those three goal bounds to infinity and leaves every observation value unchanged. It rejects observations outside the other declared bounds and checks shape and finiteness.
+
+The measured plan is source policy training followed by a fresh episode policy by task matrix, then oracle projection diagnostics. Oracle reconstruction uses trained target parameters to pick coefficients. Practical held-out learning remains a separate experiment.
+
+## Measurement validation without training
+
+Use an existing repository development environment with NumPy, Torch and pytest. These checks do not require Gymnasium, MuJoCo, Meta-World or Stable-Baselines3, and do not launch training:
+
+```bash
+python -m pytest tests/test_metaworld_geometry.py \
+  tests/test_metaworld_pilot_report.py tests/test_metaworld_checkpoint_audit.py
+python -m scripts.metaworld_pilot_report \
+  --manifest artifacts/metaworld-one-hour-pilot-r2/pilot_manifest.json \
+  --output artifacts/metaworld-validation/pilot_report.json
+python -m scripts.metaworld_checkpoint_audit \
+  --manifest artifacts/metaworld-one-hour-pilot-r2/pilot_manifest.json \
+  --output artifacts/metaworld-validation/checkpoint_audit.json
+```
+
+The report checks every planned policy/evaluation slot, complete episodes and initialization hashes. It groups outcomes by task and independent policy-library replicate; episodes and task folds do not increase the replication count. Checkpoint auditing compares saved actor vectors, parameter layouts and hashes to the saved SAC checkpoint on CPU. It verifies parameter integrity; competence comes from the recorded environment episodes.
+
+The geometry tests include a known subspace and an unseen vector in its span, an out-of-span vector, exact actor restoration and function-preserving hidden-unit permutations. Permutation checks examine both the mean and log standard deviation of the action distribution and restore the original actor even if verification fails.
+
+Interpretation depends on the information used: in-sample reconstruction checks implementation, oracle reconstruction uses target weights to choose coefficients, and practical adaptation must learn coefficients from target-task interactions while keeping the source-fitted actor basis fixed. Critic training and all interaction costs must be counted separately. This validation adds no practical-adaptation result to the pilot.
+
+Future pilot manifests record measurement coverage and code hashes. Completion requires the expected source/evaluation slots and valid initialization metadata, rather than merely finishing before the runtime deadline. The runner rejects nonpositive evaluation counts/reserves and nonempty output directories to preserve previous runs. Existing pilot manifests and checkpoints are not rewritten by these checks.
+
+## Supported runtime and competence screen
+
+The isolated lock was installed and its CUDA reset/step, 256-step SAC update, checkpoint/reload, and fresh-episode path passed locally on 2026-10-15. The root MiniHack environment is separate. From the repository root, use the isolated interpreter explicitly:
+
+```bash
+uv sync --project experiments/metaworld --frozen --no-dev
+env -u PYTHONPATH experiments/metaworld/.venv/bin/python -m scripts.metaworld_runtime_smoke \
+  --output artifacts/metaworld-runtime-smoke-new --device cuda
+env -u PYTHONPATH experiments/metaworld/.venv/bin/python -m scripts.metaworld_competence \
+  --output artifacts/metaworld-competence-new --seconds 2500 --reserve-seconds 300 \
+  --deadline-utc "${APPROVED_DEADLINE_UTC:?set an approved absolute UTC cutoff}" \
+  --steps-per-policy 25000 --evaluation-episodes 20 --seed 20261015 --device cuda
+```
+
+The second command trains one policy each on reach, push and pick-place using a shared initial actor and separate task-specific critic/environment/training seeds. It saves the shared initial actor, final checkpoints, layouts/hashes and every fresh own-task episode. Each task passes the operational screen only with complete 25,000-step training and at least 16 of 20 successful complete evaluation episodes; the whole screen also requires matching initial actor hashes. A completed screen can fail competence without being a runtime error. A 128-step/one-episode invocation is labeled as smoke data and is kept separate.
+
+This small screen performs no oracle projections or practical adaptation. Its single-library result does not estimate seed variability. The 2026-10-15 launch was authorized for one inclusive local hour, and that allowance is spent; these example commands do not authorize additional compute or another run. Preserve failures and partial outcomes under the global deadline rather than extending it.
+
+## Executable session deadlines
+
+Both population-pilot and competence runners require `--deadline-utc`, an ISO 8601 timestamp with an explicit timezone (for example `2026-11-09T20:00:00Z`). This is the approved inclusive session cutoff; `--seconds` is a separate maximum runner duration. The earlier frozen JSON remains historical evidence and does not retroactively supply this new executable argument. Example commands require an explicitly set `APPROVED_DEADLINE_UTC`; they allocate no compute.
+
+A shared guard checks the absolute UTC clock and monotonic duration before environment/model initialization, on every training callback, at environment reset/step boundaries, at SAC optimizer entry, and before/within evaluation. The evaluation reserve applies to the shorter remaining UTC/monotonic window. A detected global cutoff stays latched even if the wall clock moves backward later. Environment guards preserve the runtime environment type; the temporary optimizer guard is restored before saving a checkpoint.
+
+The legacy population-pilot module still imports its runtime dependencies before the runner clock starts; its manifest records this timing scope. Its absolute cutoff is checked before thread/CUDA/environment/model initialization. The competence runner starts and persists its clock before loading its runtime. Neither path claims preemption during Python imports.
+
+These checks are cooperative: an executing simulator, optimizer, initialization or I/O call cannot be preempted. On return from a late wake or blocking call, no further guarded transition/update starts. Checkpoint/manifest retention and resource cleanup may finish after the cutoff. The runners retain partial checkpoints, actual episode rows (marking unfinished episodes incomplete), missing-task/evaluation coverage, cutoff reason/phase, UTC start/finish/span and monotonic elapsed time. A run finishing beyond either observed limit cannot receive a complete, budget-compliant status, even when all requested scientific slots happen to be present.
+
+The regression suite uses injected clocks, inert runtime modules and fake environments/SAC with tiny CPU actors. It covers late starts, forward/backward clock jumps, monotonic exhaustion, reserves, no transitions/updates after a late wake, partial artifact retention and prevention of late completion. It performs no simulator rollouts, scientific training or real sleeps:
+
+```bash
+python -m pytest tests/test_metaworld_deadlines.py tests/test_metaworld_competence.py
+```
+
+## Reproducible task and goal protocol for new runs
+
+The historical runs above used the upstream task selector and nominal reset seeds. Meta-World 3.1.1 ignores `reset(seed=...)`; those fields do not establish paired goal sequences. SAC also seeds model construction itself, overriding an earlier `torch.manual_seed`. Preserve the old artifacts as exploratory evidence with these limitations. The corrected implementation is tracked in [task sampling and evaluation reproducibility](https://github.com/Spiph/UWSH-nethack/issues/32).
+
+`scripts/metaworld_protocol.py` pins V2 rewards independently of the `-v3` task suffix, visible 39-dimensional observations, four actions in `[-1,1]`, and full 500-step episodes. Evaluation records any-time success, continues after success, and rejects partial episodes from complete coverage. The observation-bounds adapter remains unchanged. SAC replay explicitly bootstraps at time-limit truncations; it preserves terminal observations through SB3's vector adapter.
+
+`SeedStreams.from_seed` derives separate constructor, task-bank, selection, episode, action, actor, critic and training streams. Split-specific bank seeds generate source and development configurations independently. Exact upstream task payloads, random configuration vectors, hashes, declared evaluation order and realized episode seeds/order are serialized. The controlled wrapper isolates legacy NumPy/Python draws and uses independent local task-selection and episode generators. It is a synchronous adapter; arbitrary concurrent code that mutates global RNGs is outside its contract. Forwarded reset seeds, including SB3's automatic seeds, are recorded but cannot replace these explicit streams. Reconstruct an environment from its saved bank/streams to replay it. Environment creation returns without consuming a reset or the first planned evaluation goal.
+
+`GoalManifest` declares either development-only use, within-family held-out configurations, or held-out-family transfer. It rejects duplicated configurations across splits, enforces the chosen family exclusion rule, and provides source-only fitting and development-only tuning views. Weight-provenance validation checks both task class and the source training bank, including target-trained actors from a known class. Final-test banks require an explicit final-test regime and are not generated by the exploratory pilot. Task payloads use upstream pickle encoding and are trusted local experiment artifacts.
+
+New hour-pilot runs cache source/development banks per library and task, pair development evaluation goals across arms, save initial actor arrays and effective actor/critic hashes, and record full RNG recipes. The actor is explicitly regenerated and copied after critic-seeded SAC construction; the training seed is applied afterward. This changes future reproduction behavior without rewriting past cohorts. Competence-screen integration uses the same helper; runtime rollout validation and any new calibration require a separately recorded allocation.
+
+Dependency-light validation uses fake environments and fake SAC construction, including separate-process replay, split leakage, RNG independence, complete goal coverage and timeout handling:
+
+```bash
+python -m pytest tests/test_metaworld_protocol.py
+```
+
+These tests and source inspection do not constitute a new MuJoCo rollout validation or approve training.
+
+The optional `test_metaworld_protocol_runtime.py` checks actual SAC construction and replay storage using synthetic Gymnasium spaces, with zero environment resets/steps and no learning. Run it with the existing isolated interpreter using `python -m unittest discover -s tests -p test_metaworld_protocol_runtime.py -v`. It checks actor/critic seed separation, optimizer parameter references, time-limit bootstrapping and storage of the terminal observation instead of an autoreset observation. Ordinary development pytest skips these two tests when SB3 is absent.
+
+Optional pinned-runtime checks verify actual SB3 model-seed separation and replay timeout handling on synthetic inputs, then paired physical goal sequences across all three configured tasks and the 500-step reach horizon. The physical check uses at most 522 fixed-action transitions, a 60-second dual-clock guard, no learned policy and no training. It does not measure competence or transfer. All three checks passed locally on 2026-11-09; the dependency-light development environment skips them because the optional stack is isolated.
+
+```bash
+env -u PYTHONPATH experiments/metaworld/.venv/bin/python -m unittest discover \
+  -s tests -p test_metaworld_protocol_runtime.py -v
+```
