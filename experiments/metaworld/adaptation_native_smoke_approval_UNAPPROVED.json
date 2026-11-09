@@ -1,0 +1,17 @@
+{
+  "approved": false,
+  "attempt": 1,
+  "authorization_url": null,
+  "automatic_retries": 0,
+  "code_commit": null,
+  "code_sha256": {},
+  "deadline_utc": null,
+  "decision_issue": 49,
+  "output": "/home/icannon/code/UWSH-nethack/artifacts/metaworld-adaptation-native-smoke-2026-11-09",
+  "plan_sha256": "1be2dd71e21fb4c2ffb7bd6df2d7e9b7ecaac92f92bba62144b6c49d2570dff6",
+  "session_started_utc": null,
+  "source_process_exited": false,
+  "source_lifecycle_file": null,
+  "source_lifecycle_sha256": null,
+  "source_process_pid": null
+}
