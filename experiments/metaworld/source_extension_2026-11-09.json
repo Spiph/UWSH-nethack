@@ -1,0 +1,36 @@
+{
+  "authorization_url": "https://github.com/Spiph/UWSH-nethack/issues/51#issuecomment-6749201546",
+  "deadline_utc": "2026-11-13T03:00:00+00:00",
+  "decision_issue": 51,
+  "failed_root": "/home/icannon/code/UWSH-nethack/artifacts/metaworld-development-2026-11-09",
+  "limits": {
+    "additional_sac_reloads": 2,
+    "artifact_bytes": 2147483648,
+    "development_evaluation_steps": 90000,
+    "final_test_steps": 0,
+    "preflight_steps": 1000,
+    "source_policy_starts": 8,
+    "source_training_steps": 2100000,
+    "target_steps": 0,
+    "total_agent_steps": 2191000
+  },
+  "milestones": [
+    100000,
+    250000,
+    500000,
+    1000000
+  ],
+  "original_plan_sha256": "db64456636b332c192bae867bd08f20c8beffc4b9597d727c4024cd0c0d90fae",
+  "output": "/home/icannon/code/UWSH-nethack/artifacts/metaworld-development-2026-11-09-r2-extension",
+  "parent_binding": "after PID exits and FINISHED; before extended learning",
+  "parent_root": "/home/icannon/code/UWSH-nethack/artifacts/metaworld-development-2026-11-09-r2",
+  "partial_evaluation": "retain/charge partial; redo unfinished episode within remaining cap",
+  "preflight_seconds": 871,
+  "prior_preflight_seconds_charged": 29,
+  "reserve_seconds": 1800,
+  "schema_version": 1,
+  "session_started_utc": "2026-11-09T15:35:00+00:00",
+  "source_policy_identity": "unchanged; necessary reloads are not independent policies",
+  "supervisor_reserve_bytes": 16777216,
+  "training_deadline_utc": "2026-11-13T02:30:00+00:00"
+}
