@@ -504,7 +504,12 @@ def test_progress_refreshes_cumulative_total_before_persist_and_keeps_history_im
     model = SimpleNamespace(
         num_timesteps=0, logger=SimpleNamespace(name_to_value={}), ep_info_buffer=[]
     )
-    state: Any = SimpleNamespace(task="reach-v3", model=model)
+    protocol: dict[str, Any] = {"episode_history": []}
+    state: Any = SimpleNamespace(
+        task="reach-v3",
+        model=model,
+        env=SimpleNamespace(get_wrapper_attr=lambda name: lambda: protocol),
+    )
 
     class FakeBaseCallback:
         def __init__(self, verbose: int = 0) -> None:

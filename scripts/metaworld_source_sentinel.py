@@ -598,7 +598,11 @@ def approved_launch(plan: dict[str, Any], approval: dict[str, Any]) -> dict[str,
             with (output / "startup_failure.json").open("xb") as handle:
                 handle.write(encoded)
         raise
-    return SentinelRunner(plan, approval, source, budget, store, NativeRuntime).run()
+    from scripts.metaworld_reporting_sidecar import reporting_sidecar
+
+    runner = SentinelRunner(plan, approval, source, budget, store, NativeRuntime)
+    with reporting_sidecar(output / "sentinel_manifest.json", artifact_limit=store.limit):
+        return runner.run()
 
 
 def main(argv: list[str] | None = None) -> int:

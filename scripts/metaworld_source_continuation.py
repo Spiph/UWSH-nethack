@@ -674,7 +674,12 @@ def main(argv: list[str] | None = None) -> int:
     budget.started_monotonic = entered_monotonic
     runner = ContinuationRunner(plan, approval, budget=budget)
     runner.stop_file = args.stop_file
-    result = runner.run()
+    from scripts.metaworld_reporting_sidecar import reporting_sidecar
+
+    with reporting_sidecar(
+        runner.store.root / "development_manifest.json", artifact_limit=runner.store.limit
+    ):
+        result = runner.run()
     print(json.dumps({"status": result["status"], "ledger": result["ledger"]}, sort_keys=True))
     return (
         0 if result["status"] in ("COMPLETE_PASS", "COMPLETE_FAIL", "NOOP_ALREADY_COMPLETE") else 1

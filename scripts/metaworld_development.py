@@ -12,6 +12,7 @@ import math
 import pickle
 import random
 import re
+import stat
 import traceback
 import zipfile
 from collections.abc import Callable, Iterator
@@ -58,11 +59,43 @@ def ledger_snapshot(ledger: dict[str, int]) -> dict[str, int]:
     return snapshot
 
 
+def source_episode_summary(history: list[dict[str, Any]]) -> dict[str, Any]:
+    """Describe completed source collection episodes without counting partial successes."""
+    complete = [
+        row for row in history if row.get("complete_episode") is True and row.get("length") == 500
+    ]
+    recent = complete[-100:]
+    return {
+        "complete_episodes": len(complete),
+        "successful_complete_episodes": sum(row.get("success") is True for row in complete),
+        "recent_complete_episodes": len(recent),
+        "recent_successes": sum(row.get("success") is True for row in recent),
+        "scope": "adaptive source collection; not a frozen-policy evaluation or replication",
+    }
+
+
+def training_diagnostics(values: dict[str, Any]) -> tuple[dict[str, float], list[str]]:
+    """Keep JSON numeric telemetry finite and expose nonfinite keys to the observer."""
+    numeric_values, nonfinite = {}, []
+    for key, value in values.items():
+        if not key.startswith("train/"):
+            continue
+        try:
+            numeric = float(value)
+        except (TypeError, ValueError):
+            continue
+        if math.isfinite(numeric):
+            numeric_values[key] = numeric
+        else:
+            nonfinite.append(key)
+    return numeric_values, sorted(nonfinite)
+
+
 class CappedWriter(io.BufferedWriter):
     def __init__(self, path: Path, store: ArtifactStore, metadata: bool = False) -> None:
         self.store = store
         self.limit = store.limit if metadata else store.limit - store.reserve
-        self.others = store.size() - (path.stat().st_size if path.exists() else 0)
+        self.others = store.accounted_size() - (path.stat().st_size if path.exists() else 0)
         self.high_water = 0
         super().__init__(io.FileIO(path, "wb"))
 
@@ -89,7 +122,43 @@ class ArtifactStore:
         self.reserve = min(4 * 1024 * 1024, limit // 10)
 
     def size(self) -> int:
-        return sum(path.stat().st_size for path in self.root.rglob("*") if path.is_file())
+        """Count actual bytes, tolerating atomic replacements by the observer."""
+        scientific, reporting = self._storage_parts()
+        return scientific + reporting
+
+    def _storage_parts(self) -> tuple[int, int]:
+        scientific, reporting = 0, 0
+        reporting_root = self.root / "live_reports"
+        for path in self.root.rglob("*"):
+            observer_owned = path.is_relative_to(reporting_root)
+            try:
+                info = path.stat()
+            except FileNotFoundError:
+                if observer_owned:
+                    # Only this subtree has an independent atomic-file writer.
+                    continue
+                raise
+            if stat.S_ISREG(info.st_mode):
+                if observer_owned:
+                    reporting += info.st_size
+                else:
+                    scientific += info.st_size
+        return scientific, reporting
+
+    def accounted_size(self) -> int:
+        """Reserve all possible observer growth before snapshotting a writer cap.
+
+        The CLI creates live_reports before any scientific work starts. Its
+        observer has the same fixed min(1 MiB, artifact allowance / 10) cap.
+        Reserving that entire subtree prevents concurrent report replacement
+        from consuming a scientific writer's snapshotted remaining allowance.
+        Without live reporting this is the original actual-byte accounting.
+        """
+        scientific, reporting = self._storage_parts()
+        reservation = (
+            min(1024 * 1024, self.limit // 10) if (self.root / "live_reports").is_dir() else 0
+        )
+        return scientific + max(reporting, reservation)
 
     def open(self, relative: str, *, metadata: bool = False) -> CappedWriter:
         path = self.root / relative
@@ -669,22 +738,19 @@ class Runtime:
             runner.check("training")
             steps = int(callback.model.num_timesteps)
             if steps % 1000 == 0:
-                diagnostics = {}
-                for key, value in callback.model.logger.name_to_value.items():
-                    if key.startswith("train/"):
-                        try:
-                            numeric = float(value)
-                        except (TypeError, ValueError):
-                            continue
-                        if math.isfinite(numeric):
-                            diagnostics[key] = numeric
+                diagnostics, nonfinite = training_diagnostics(callback.model.logger.name_to_value)
                 episodes = list(callback.model.ep_info_buffer or [])
                 returns = [float(row["r"]) for row in episodes if "r" in row]
+                protocol = state.env.get_wrapper_attr("protocol_manifest")()
                 record = {
                     "task": state.task,
                     "training_steps": steps,
                     "utc": runner.budget.now().isoformat(),
                     "diagnostics": diagnostics,
+                    "nonfinite_diagnostic_keys": nonfinite,
+                    "source_training_episode_summary": source_episode_summary(
+                        protocol["episode_history"]
+                    ),
                     "training_episode_return_mean": sum(returns) / len(returns)
                     if returns
                     else None,
@@ -799,7 +865,13 @@ def main(argv: list[str] | None = None) -> int:
     if args.approval is None:
         parser.error("--run requires --approval for the frozen plan")
     approval = json.loads(args.approval.read_text())
-    result = DevelopmentRunner(plan, approval).run()
+    from scripts.metaworld_reporting_sidecar import reporting_sidecar
+
+    runner = DevelopmentRunner(plan, approval)
+    with reporting_sidecar(
+        runner.store.root / "development_manifest.json", artifact_limit=runner.store.limit
+    ):
+        result = runner.run()
     print(json.dumps({"status": result["status"], "ledger": result["ledger"]}, indent=2))
     return 0 if result["status"].startswith("COMPLETE_") else 2
 
