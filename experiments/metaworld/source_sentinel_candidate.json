@@ -1,0 +1,72 @@
+{
+  "action_boundary": "clip_all_four_to_minus1_plus1_no_extra_scale",
+  "approved": false,
+  "artifact_bytes": 8388608,
+  "attempts": 1,
+  "automatic_retries": 0,
+  "cleanup_seconds": 5,
+  "cpu_only": true,
+  "decision_issue": 56,
+  "development_steps": 0,
+  "environment_constructors": 2,
+  "episode_horizon": 500,
+  "evidence": {
+    "final": {
+      "path": "/home/icannon/code/UWSH-nethack/artifacts/metaworld-development-2026-11-09-r2-extension/development_manifest.json",
+      "sha256": "2b751ea1d9c4d051c4edb89237987d360924d1b49d75f325ae4adcc472d94b74"
+    },
+    "original": {
+      "path": "/home/icannon/code/UWSH-nethack/artifacts/metaworld-development-2026-11-09-r2/development_manifest.json",
+      "sha256": "1eb874f5d63f4d76d005eae101541c2a1305650f8373282891f0c044f62ac7e4"
+    },
+    "supervisor": {
+      "path": "/tmp/ups-development-20261109/source-extension-supervisor/status.json",
+      "sha256": "8411451b003fec9c772009b0e6e4217ec88a70819b3cab69db8de0db1cfa85e9"
+    }
+  },
+  "final_test_steps": 0,
+  "goal_index": 0,
+  "optimizer_updates": 0,
+  "outer_timeout_seconds": 300,
+  "output": "/home/icannon/code/UWSH-nethack/artifacts/metaworld-scripted-source-sentinel-2026-11-10",
+  "purpose": "scripted_source_only_physical_sentinel_not_learning",
+  "sac_initializations": 0,
+  "schema_version": 1,
+  "scripted_controller_instances": 2,
+  "source_actor_array_loads": 0,
+  "source_diagnostic_steps": 1000,
+  "source_pids": [
+    205152,
+    362873,
+    400119
+  ],
+  "split": "source",
+  "target_steps": 0,
+  "tasks": [
+    {
+      "bank_sha256": "cf6c63bb66518c9c63eb0d47c0090c0814d913a3c47b0652feb09a28b7e025de",
+      "episode_seed": 2562001696,
+      "goal_id": "b5f92d7ca8c8a60f05ad4eefd48a87261c04dde6920d26a5693d9903b4d0beb5",
+      "policy_class": "SawyerPushV3Policy",
+      "policy_file_sha256": "921d7380bc04fce1834cf025fde0bdf4aa625fcf5ffbd93c7c5a85eb40e4cf53",
+      "policy_module": "sawyer_push_v3_policy",
+      "task": "push-v3"
+    },
+    {
+      "bank_sha256": "cb828e9a92dfee54f80f5758f069a5e4081edb9b28042fa13b77b70fa07fc712",
+      "episode_seed": 1245230885,
+      "goal_id": "c5ad03653cdd7aa6f95449bd6bf13a774a1fd000f12bb45a022ca2c0390bde3f",
+      "policy_class": "SawyerPickPlaceV3Policy",
+      "policy_file_sha256": "3d64ddf57c5cf6ddcee28945005bbbe040964d7dd1ec8b68cfe55175ad5acfbc",
+      "policy_module": "sawyer_pick_place_v3_policy",
+      "task": "pick-place-v3"
+    }
+  ],
+  "versions": {
+    "gymnasium": "1.1.1",
+    "metaworld": "3.1.1",
+    "mujoco": "3.3.0",
+    "numpy": "1.26.4"
+  },
+  "window_seconds": 300
+}
