@@ -1,4 +1,4 @@
-This is the unapproved [scripted physical sentinel proposal](https://github.com/Spiph/UWSH-nethack/issues/56), prepared before any new interaction. It tests the physical manipulation path after the failed developmental source gate. It is not training, held-out adaptation, a competence estimate or confirmation.
+This records the [approved scripted physical sentinel](https://github.com/Spiph/UWSH-nethack/issues/56#issuecomment-6778019497), prepared before new interaction and executed on2026-11-10. It tests the physical manipulation path after the failed developmental source gate. It is not training, held-out adaptation, a competence estimate or confirmation.
 
 The exact candidate is two complete500-step episodes: one pinned official scripted controller on source-goal index0 for push-v3 and pick-place-v3. Total new source-diagnostic interactions are1000; development, target and final-test interactions are zero. Maximums are two environment constructors, two scripted-controller instances, one CPU process, five inclusive minutes,8MiB of new artifacts, one attempt and no retry. No Torch, SAC, source-policy array loading, learned actor construction or optimizer update is permitted. The larger4000-step scripted/frozen comparison remains a separate later option without allocation.
 
@@ -25,3 +25,36 @@ timeout --signal=INT --kill-after=5s 300s env -u PYTHONPATH \
 ```
 
 This command is a proposal, not a launch instruction. Actual five-minute timestamps, current-head hashes and the approval reference must be frozen before execution. Blocking native calls cannot be interrupted by a Python check; the outer guard permits at most five seconds for cleanup. Synthetic/fake tests prepare the harness without executing this command or creating an environment. Scripted traces are reference diagnostics and must remain excluded from policy-library fitting or target adaptation data.
+
+
+## Approved execution and result
+
+The user replied “continue” to the exact1000-step/five-minute/8MiB request. The approved run used frozen commit `fceca5658bbac8fff410d37013a87510b3166c41`; subsequent reporting changes do not change that executable record. All hosted quality/container checks passed before launch.
+
+| Source task | First successful transition (one-based) | Success steps /500 | Final-step success |
+| --- | ---: | ---: | --- |
+| push-v3 |63 |193 |false |
+| pick-place-v3 |54 |447 |true |
+
+Both episodes completed all500 steps and achieved the declared any-time criterion. Pick-place lifted the object131.97mm. Push later displaced the object away again (final object-goal distance484.76mm); it does not demonstrate stable final placement. Maximum native reward was10 for both. These are two physical positive controls, not success-rate estimates or learned-policy competence.
+
+The process finished20:08:19UTC, within the fixed20:05:56–20:10:56UTC setup/interaction allowance. Inclusive setup+runtime was143.161seconds; the native process recorded3.476seconds. Attempted and observed source-diagnostic steps were both1000, environment/controller counts2each, resets2; errors, training updates, learned-weight loads, Torch/SAC work and development/target/final interactions were zero. Independent auditing verified trace hashes, goals/seeds, finite coordinates, adjacent/previous-frame continuity, all-four float32 action clipping and exact500-step truncations.
+
+The local run root is `artifacts/metaworld-scripted-source-sentinel-2026-11-10`; manifest SHA-256 `bcbb391f0ea5f2cb04354eefe94ead5ebaa170283e475027470bf1caf406e06b`. Push/pick-place trace hashes are respectively `af9146dedc835e699ad910fbae3a31320188350ff0732eac0d80198a9ffed5ef` and `e52d7635e671d136221778cee2d8970091601b17b52057521efcbdc594b96b21`. Persistent control/approval/recovery records are under `artifacts/metaworld-sentinel-control-2026-11-10`. The temporary checkout and old control path had disappeared before setup; the exact prior supervisor JSON was recovered from the recorded tool output and matched its frozen SHA byte-for-byte. A persistent recovery receipt distinguishes that metadata recovery from scientific results. Code was restored from its signed commit into a persistent workspace checkout.
+
+## Read-only comparison with retained learning
+
+The final source histories contain2successes in40episodes on selected push source-goal0 and0in25 on selected pick-place source-goal0. These are adaptive stochastic training histories, not a matched frozen-policy experiment.
+
+`compare_scripted_source_replay.py` additionally compares the saved scripted trace with the final50k source replay window, conditional on the same visible goal XYZ. In that window push goal0 has3000 transitions: median hand-object distance proxy274mm versus43mm for the scripted trajectory; closest object-goal distance65.57mm versus15.60mm. The replay uses different episode seeds and evolving stochastic policies; this is descriptive support for poor learned approach/transport, not a causal estimate. Pick-place goal0 is absent from the final retained window, so the tool reports no conditional replay summary rather than inventing a comparison.
+
+```bash
+python -m scripts.compare_scripted_source_replay \
+  --source-manifest /home/icannon/code/UWSH-nethack/artifacts/metaworld-development-2026-11-09-r2-extension/development_manifest.json \
+  --sentinel-manifest /home/icannon/code/UWSH-nethack/artifacts/metaworld-scripted-source-sentinel-2026-11-10/sentinel_manifest.json \
+  --output /path/to/new-comparison.json
+```
+
+The comparison verifies input hashes and imports no native stack or environment. It performs zero new interactions. Its local output is `artifacts/metaworld-sentinel-control-2026-11-10/replay_comparison.json`.
+
+The positive control narrows the explanation toward the learned source recipe and acquisition of manipulation behavior for these settings. It does not identify replay capacity, entropy, warmup or any other hyperparameter as the cause. A further controlled learning diagnostic needs a separately frozen design and resource decision; no additional training is approved by this run.
