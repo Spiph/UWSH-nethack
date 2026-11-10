@@ -165,8 +165,10 @@ for task in ("reach-v3", "push-v3", "pick-place-v3"):
         with np.load(actor, allow_pickle=False) as archive:
             vector = archive["vector"]
             layout = json.loads(str(archive["layout_json"].item()))
-            p = {r["name"]: vector[r["start"]:r["end"]].reshape(r["shape"]).astype(np.float32)
-                 for r in layout}
+            p = {
+                r["name"]: vector[r["start"] : r["end"]].reshape(r["shape"]).astype(np.float32)
+                for r in layout
+            }
         with replay.open("rb") as reader:
             buffer = load_replay(reader)
         n = buffer.buffer_size if buffer.full else buffer.pos
