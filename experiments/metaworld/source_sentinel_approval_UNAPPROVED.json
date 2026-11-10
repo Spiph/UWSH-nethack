@@ -1,0 +1,13 @@
+{
+  "approved": false,
+  "attempt": 1,
+  "authorization_url": null,
+  "automatic_retries": 0,
+  "code_commit": null,
+  "code_sha256": {},
+  "deadline_utc": null,
+  "decision_issue": 56,
+  "output": "/home/icannon/code/UWSH-nethack/artifacts/metaworld-scripted-source-sentinel-2026-11-10",
+  "plan_sha256": "2ec21e2c6c36b1470263d75149e57be94b7581d2368d3b3e6eae8ae17ca63d19",
+  "session_started_utc": null
+}
