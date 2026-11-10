@@ -371,8 +371,14 @@ def main(argv: list[str] | None = None) -> int:
         parser.error("--run requires a new approved issue-43 record")
     approval = json.loads(args.approval.read_text())
     validate_retry_approval(plan, contract, approval)
+    from scripts.metaworld_reporting_sidecar import reporting_sidecar
+
     with prior_evidence_lock(contract):
-        result = TechnicalRetryRunner(plan, contract, approval).run()
+        runner = TechnicalRetryRunner(plan, contract, approval)
+        with reporting_sidecar(
+            runner.store.root / "development_manifest.json", artifact_limit=runner.store.limit
+        ):
+            result = runner.run()
     print(json.dumps({"status": result["status"], "ledger": result["ledger"]}, indent=2))
     return 0 if result["status"].startswith("COMPLETE_") else 2
 
